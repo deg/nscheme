@@ -220,4 +220,3 @@ fn history_path() -> Option<std::path::PathBuf> {
         p
     })
 }
-
