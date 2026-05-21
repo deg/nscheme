@@ -4,5 +4,7 @@
 //! that consumes this library; all language behavior lives here so the
 //! interpreter can be embedded in other Rust applications.
 
+pub mod lex;
+
 /// Crate version, taken from `Cargo.toml` at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
