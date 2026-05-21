@@ -58,6 +58,9 @@ pub enum RuntimeError {
     #[error("division by zero")]
     DivisionByZero,
 
+    #[error("integer overflow in `{op}`")]
+    Overflow { op: &'static str },
+
     #[error("{0}")]
     Other(String),
 }
