@@ -1,5 +1,10 @@
 
+# Rust build artifacts
+/target/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
 .beads-credential-key
+# Beads atomic-write temp files
+.beads/.~*

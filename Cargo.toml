@@ -1,0 +1,32 @@
+[package]
+name = "nscheme"
+version = "0.1.0"
+edition = "2024"
+description = "An R7RS-small Scheme interpreter written in Rust"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "nscheme"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nscheme"
+path = "src/main.rs"
+
+[dependencies]
+thiserror = "2"
+
+[dev-dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Pragmatic exceptions:
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
