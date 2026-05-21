@@ -101,7 +101,7 @@ pub struct Token {
 
 /// Lexical errors. All variants carry a [`Span`] so the caller can render
 /// a diagnostic against the original source.
-#[derive(Debug, Error, Eq, PartialEq)]
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum LexError {
     #[error("unexpected character {ch:?} at byte {}", span.start)]
     UnexpectedChar { ch: char, span: Span },

@@ -791,7 +791,7 @@ mod tests {
             format!("{}", Value::vector(vec![Value::Int(1), Value::Int(2)])),
             "#(1 2)",
         );
-        assert_eq!(format!("{}", Value::bytevector(vec![1, 255])), "#u8(1 255)",);
+        assert_eq!(format!("{}", Value::bytevector(vec![1, 255])), "#u8(1 255)");
     }
 
     #[test]
