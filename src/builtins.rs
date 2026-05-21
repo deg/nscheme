@@ -428,6 +428,9 @@ fn install_predicates(env: &EnvRef) {
     define(env, "pair?", Arity::Exact(1), |a| {
         Ok(Value::Bool(a[0].is_pair()))
     });
+    define(env, "list?", Arity::Exact(1), |a| {
+        Ok(Value::Bool(a[0].list_length().is_some()))
+    });
     define(env, "boolean?", Arity::Exact(1), |a| {
         Ok(Value::Bool(a[0].is_boolean()))
     });
