@@ -84,13 +84,18 @@ enum Step {
     Apply(Value, Vec<Value>),
     /// A sub-evaluation produced this value; resume the next frame.
     Return(Value),
+    /// Replace the evaluator's frame stack with the captured one and
+    /// resume by returning `value`. Used to invoke a continuation
+    /// captured by `call/cc`.
+    InvokeContinuation(Vec<Frame>, Value),
 }
 
 /// Pending work that resumes when a sub-evaluation returns.
 ///
 /// Every variant carries an `env` so it can resume in the correct
 /// lexical scope.
-enum Frame {
+#[derive(Clone)]
+pub enum Frame {
     /// `(if test conseq alt)` — `test` is currently evaluating.
     IfBranch {
         conseq: Value,
@@ -134,6 +139,14 @@ enum Frame {
     /// `(or e1 … en)` — short-circuit OR. The currently-evaluating
     /// expression is non-last.
     OrNext { remaining: Vec<Value>, env: EnvRef },
+    /// `(apply proc a1 ... arglist)` — evaluating arg expressions.
+    /// `evaluated[0]` is the proc once it has been evaluated. The
+    /// last evaluated arg is spread when remaining becomes empty.
+    ApplySpread {
+        evaluated: Vec<Value>,
+        remaining: Vec<Value>,
+        env: EnvRef,
+    },
 }
 
 // ---------------------------------------------------------------------
@@ -154,6 +167,10 @@ pub fn eval(expr: Value, env: EnvRef) -> Result<Value, EvalError> {
                 Some(frame) => resume(frame, value, &mut frames)?,
                 None => return Ok(value),
             },
+            Step::InvokeContinuation(saved, value) => {
+                frames = saved;
+                Step::Return(value)
+            }
         };
     }
 }
@@ -161,13 +178,20 @@ pub fn eval(expr: Value, env: EnvRef) -> Result<Value, EvalError> {
 /// Convenience: lex, parse, and evaluate every top-level datum in
 /// `source` in `env`. Returns the value of the last expression (or
 /// [`Value::Unspecified`] if `source` is empty).
+///
+/// All top-level datums share a single evaluator loop (wrapped in an
+/// implicit `begin`) so that continuations captured by `call/cc` can
+/// span across top-level forms — invoking a saved continuation jumps
+/// back to whatever was about to happen at capture time, even if a
+/// later top-level form has since started evaluating.
 pub fn eval_source(source: &str, env: EnvRef) -> Result<Value, EvalError> {
     let datums = parse_program(source)?;
-    let mut last = Value::Unspecified;
-    for d in datums {
-        last = eval(d, env.clone())?;
+    if datums.is_empty() {
+        return Ok(Value::Unspecified);
     }
-    Ok(last)
+    let mut begin_items = vec![Value::Symbol(Symbol::intern("begin"))];
+    begin_items.extend(datums);
+    eval(Value::list_from(begin_items), env)
 }
 
 // ---------------------------------------------------------------------
@@ -235,6 +259,10 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
             "define-library" => return step_define_library(tail, env),
             "import" => return step_import(tail, env),
             "cond-expand" => return step_cond_expand(tail, env, frames),
+            "call/cc" | "call-with-current-continuation" => {
+                return step_call_cc(tail, env, frames);
+            }
+            "apply" => return step_apply_form(tail, env, frames),
             _ => { /* fall through to procedure call or macro */ }
         }
         // Macro application: if the head symbol resolves to a Macro
@@ -425,6 +453,70 @@ fn import_one(lib_form: &Value, target: &EnvRef) -> Result<(), EvalError> {
         target.define(name, value);
     }
     Ok(())
+}
+
+/// `(apply proc a1 a2 ... arglist)` — spreads `arglist` as the trailing
+/// arguments and applies `proc`. Implemented as a special form so we
+/// don't need a primitive-side trampoline.
+fn step_apply_form(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let items = collect_list(&tail)
+        .map_err(|()| EvalError::malformed("apply", "argument list must be proper"))?;
+    if items.is_empty() {
+        return Err(EvalError::malformed(
+            "apply",
+            "expected at least proc and arglist",
+        ));
+    }
+    let proc_expr = items[0].clone();
+    let inner_args = items[1..].to_vec();
+    if inner_args.is_empty() {
+        // (apply proc) with no further args is a corner case;
+        // R7RS requires at least one arg-list. Treat (apply proc) as
+        // applying proc to (). This is permissive but harmless.
+        frames.push(Frame::ApplySpread {
+            evaluated: Vec::new(),
+            remaining: Vec::new(),
+            env: env.clone(),
+        });
+        return Ok(Step::Eval(proc_expr, env));
+    }
+    // Push an ApplySpread frame that will, after evaluating the proc
+    // and each arg, treat the last evaluated arg as the spread list.
+    frames.push(Frame::ApplySpread {
+        evaluated: Vec::new(),
+        remaining: inner_args,
+        env: env.clone(),
+    });
+    Ok(Step::Eval(proc_expr, env))
+}
+
+/// `(call/cc proc)` — capture the current continuation and apply
+/// `proc` to it. The captured continuation is exactly the frame stack
+/// at the moment of the call/cc; invoking the continuation later
+/// replaces the live frame stack with the saved one.
+fn step_call_cc(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let mut iter = ListIter::new(tail);
+    let proc_expr = iter
+        .next()
+        .ok_or_else(|| EvalError::malformed("call/cc", "expected one operand"))??;
+    if iter.next().is_some() {
+        return Err(EvalError::malformed(
+            "call/cc",
+            "expected exactly one operand",
+        ));
+    }
+    // Capture the frame stack BEFORE we push our CallOp. The
+    // continuation represents "what was going to happen after call/cc
+    // returned"; invoking it should make that happen.
+    let saved_frames = frames.clone();
+    let cont = Value::Procedure(Rc::new(Procedure::Continuation {
+        frames: saved_frames,
+    }));
+    frames.push(Frame::CallOp {
+        args: vec![cont],
+        env: env.clone(),
+    });
+    Ok(Step::Eval(proc_expr, env))
 }
 
 fn step_cond_expand(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
@@ -1318,6 +1410,14 @@ fn step_apply(
             // Body: evaluate in sequence, last in tail position.
             Ok(eval_sequence(body.clone(), call_env, frames))
         }
+        Procedure::Continuation { frames: saved } => {
+            // Invoking a captured continuation: replace the current
+            // frame stack and resume by returning the supplied value.
+            // R7RS allows multi-value continuations; we take the first
+            // arg (or Unspecified for 0-arg invocation).
+            let value = args.into_iter().next().unwrap_or(Value::Unspecified);
+            Ok(Step::InvokeContinuation(saved.clone(), value))
+        }
     }
 }
 
@@ -1472,6 +1572,53 @@ fn resume(frame: Frame, value: Value, frames: &mut Vec<Frame>) -> Result<Step, E
                     env: env.clone(),
                 });
             }
+            Ok(Step::Eval(next, env))
+        }
+        Frame::ApplySpread {
+            mut evaluated,
+            mut remaining,
+            env,
+        } => {
+            // First time we hit this frame, `value` is the procedure;
+            // subsequent times it's an arg. Push the just-arrived
+            // value onto `evaluated`.
+            evaluated.push(value);
+            if remaining.is_empty() {
+                // All exprs have been evaluated. evaluated[0] is the
+                // procedure; evaluated[1..n-1] are leading args;
+                // evaluated[n-1] is the list to spread.
+                let mut final_args: Vec<Value> = evaluated.iter().skip(1).cloned().collect();
+                // If there's nothing to spread (only proc), just apply
+                // to empty args.
+                if let Some(last) = final_args.pop() {
+                    // Walk the list and append its elements.
+                    let mut cur = last;
+                    loop {
+                        match cur {
+                            Value::Null => break,
+                            Value::Pair(p) => {
+                                let pair = p.borrow();
+                                final_args.push(pair.car.clone());
+                                cur = pair.cdr.clone();
+                            }
+                            _ => {
+                                return Err(EvalError::malformed(
+                                    "apply",
+                                    "last argument must be a proper list",
+                                ));
+                            }
+                        }
+                    }
+                }
+                let proc = evaluated.into_iter().next().unwrap();
+                return Ok(Step::Apply(proc, final_args));
+            }
+            let next = remaining.remove(0);
+            frames.push(Frame::ApplySpread {
+                evaluated,
+                remaining,
+                env: env.clone(),
+            });
             Ok(Step::Eval(next, env))
         }
     }

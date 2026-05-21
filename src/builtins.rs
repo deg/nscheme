@@ -1345,6 +1345,17 @@ const BOOTSTRAP: &str = r"
 (define (cddr p) (cdr (cdr p)))
 (define (caddr p) (car (cdr (cdr p))))
 (define (cadddr p) (car (cdr (cdr (cdr p)))))
+
+;; Simple dynamic-wind. R7RS requires before/after to also fire on
+;; continuation jumps in/out of the protected region. The continuation
+;; bead (nscheme-0xn) documents that v1 only guarantees the linear
+;; case (no escape).
+(define (dynamic-wind before thunk after)
+  (before)
+  (let ((result (thunk)))
+    (after)
+    result))
+
 ";
 
 // ---------------------------------------------------------------------

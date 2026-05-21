@@ -181,6 +181,11 @@ pub enum Procedure {
         /// `#<procedure foo>` rendering and error messages.
         name: Option<String>,
     },
+    /// A reified continuation, produced by `call/cc`. Invoking it
+    /// replaces the evaluator's frame stack with `frames` and resumes
+    /// by returning the supplied value to whatever was about to happen
+    /// when the continuation was captured.
+    Continuation { frames: Vec<crate::eval::Frame> },
 }
 
 impl Procedure {
@@ -188,6 +193,7 @@ impl Procedure {
         match self {
             Self::Primitive { name, .. } => name,
             Self::Closure { name, .. } => name.as_deref().unwrap_or("anonymous"),
+            Self::Continuation { .. } => "continuation",
         }
     }
 }
@@ -207,6 +213,10 @@ impl fmt::Debug for Procedure {
                 .field("name", name)
                 .field("params", params)
                 .field("rest", rest)
+                .finish_non_exhaustive(),
+            Self::Continuation { frames } => f
+                .debug_struct("Continuation")
+                .field("frame_count", &frames.len())
                 .finish_non_exhaustive(),
         }
     }
