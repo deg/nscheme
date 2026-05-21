@@ -5,6 +5,7 @@
 //! interpreter can be embedded in other Rust applications.
 
 pub mod lex;
+pub mod value;
 
 /// Crate version, taken from `Cargo.toml` at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
