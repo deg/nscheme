@@ -117,6 +117,23 @@ enum Frame {
         remaining: Vec<Value>,
         env: EnvRef,
     },
+    /// `(cond (t b…) … )` — currently evaluating the test of `clause`;
+    /// `remaining_clauses` holds the as-yet-unexamined clauses.
+    CondClause {
+        clause: Value,
+        remaining_clauses: Vec<Value>,
+        env: EnvRef,
+    },
+    /// `((test => proc-expr))` — the test was truthy and produced
+    /// `test_value`; `proc-expr` is currently evaluating.
+    CondArrow { test_value: Value, env: EnvRef },
+    /// `(and e1 … en)` — short-circuit AND. The currently-evaluating
+    /// expression is non-last (we never push this frame for the tail
+    /// expression).
+    AndNext { remaining: Vec<Value>, env: EnvRef },
+    /// `(or e1 … en)` — short-circuit OR. The currently-evaluating
+    /// expression is non-last.
+    OrNext { remaining: Vec<Value>, env: EnvRef },
 }
 
 // ---------------------------------------------------------------------
@@ -198,6 +215,18 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
             "define" => return step_define(tail, env, frames),
             "set!" => return step_set(tail, env, frames),
             "begin" => return step_begin(tail, env, frames),
+            // Derived forms (T8 nscheme-i4h):
+            "let" => return step_let(tail, env, frames),
+            "let*" => return step_let_star(tail, env, frames),
+            "letrec" | "letrec*" => return step_letrec(tail, env, frames),
+            "cond" => return step_cond(tail, env, frames),
+            "case" => return step_case(tail, env, frames),
+            "and" => return step_and(tail, env, frames),
+            "or" => return step_or(tail, env, frames),
+            "when" => return step_when(tail, env, frames),
+            "unless" => return step_unless(tail, env, frames),
+            "do" => return step_do(tail, env, frames),
+            "quasiquote" => return step_quasiquote(&tail, env),
             _ => { /* fall through to procedure call */ }
         }
     }
@@ -377,6 +406,550 @@ fn eval_sequence(exprs: Vec<Value>, env: EnvRef, frames: &mut Vec<Frame>) -> Ste
 }
 
 // ---------------------------------------------------------------------
+// Derived forms (T8)
+// ---------------------------------------------------------------------
+
+/// `(let ((v e) ...) body...)` desugars to `((lambda (v ...) body...) e ...)`.
+/// `(let name ((v e) ...) body...)` is named let: desugars to
+/// `((letrec ((name (lambda (v ...) body...))) name) e ...)`.
+fn step_let(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let (first, after_first) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("let", "expected bindings and body"))?;
+    if let Value::Symbol(name) = &first {
+        // Named let.
+        let name = name.clone();
+        let (bindings_form, body_tail) = after_first
+            .as_pair()
+            .ok_or_else(|| EvalError::malformed("let", "named let needs bindings and body"))?;
+        let bindings = parse_bindings(&bindings_form, "let")?;
+        let body = collect_list(&body_tail)
+            .map_err(|()| EvalError::malformed("let", "body must be a proper list"))?;
+        if body.is_empty() {
+            return Err(EvalError::malformed("let", "body must not be empty"));
+        }
+        let (vars, inits): (Vec<Symbol>, Vec<Value>) = bindings.into_iter().unzip();
+
+        // Build (letrec ((name (lambda (vars...) body...))) (name inits...))
+        let lambda_form = list_from_parts(&[
+            sym("lambda"),
+            Value::list_from(vars.iter().cloned().map(Value::Symbol)),
+        ])
+        .into_proper(body);
+        let letrec_bind = Value::list_from([Value::Symbol(name.clone()), lambda_form]);
+        let letrec_binds = Value::list_from([letrec_bind]);
+        let call_inits: Vec<Value> = std::iter::once(Value::Symbol(name)).chain(inits).collect();
+        let letrec_body = Value::list_from(call_inits);
+        let letrec_form = Value::list_from([sym("letrec"), letrec_binds, letrec_body]);
+        return Ok(Step::Eval(letrec_form, env));
+    }
+    // Plain let.
+    let bindings = parse_bindings(&first, "let")?;
+    let body = collect_list(&after_first)
+        .map_err(|()| EvalError::malformed("let", "body must be a proper list"))?;
+    if body.is_empty() {
+        return Err(EvalError::malformed("let", "body must not be empty"));
+    }
+    let (vars, inits): (Vec<Symbol>, Vec<Value>) = bindings.into_iter().unzip();
+    // Build ((lambda (vars...) body...) inits...).
+    let formals = Value::list_from(vars.into_iter().map(Value::Symbol));
+    let lambda_head = list_from_parts(&[sym("lambda"), formals]).into_proper(body);
+    let mut call_items = vec![lambda_head];
+    call_items.extend(inits);
+    let call = Value::list_from(call_items);
+    // Drop frames param — we're delegating to the normal eval.
+    let _ = frames;
+    Ok(Step::Eval(call, env))
+}
+
+/// `(let* () body) ⇒ (let () body)`.
+/// `(let* ((v e) rest...) body) ⇒ (let ((v e)) (let* (rest...) body))`.
+fn step_let_star(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let (bindings_form, body_tail) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("let*", "expected bindings and body"))?;
+    let bindings = parse_bindings(&bindings_form, "let*")?;
+    let body = collect_list(&body_tail)
+        .map_err(|()| EvalError::malformed("let*", "body must be a proper list"))?;
+    if body.is_empty() {
+        return Err(EvalError::malformed("let*", "body must not be empty"));
+    }
+    // Build nested lets right-to-left.
+    let inner = if body.len() == 1 {
+        body.into_iter().next().unwrap()
+    } else {
+        // Wrap body in (begin ...).
+        let mut items = vec![sym("begin")];
+        items.extend(body);
+        Value::list_from(items)
+    };
+    let mut acc = inner;
+    for (v, e) in bindings.into_iter().rev() {
+        let one_bind = Value::list_from([Value::Symbol(v), e]);
+        let binds = Value::list_from([one_bind]);
+        acc = Value::list_from([sym("let"), binds, acc]);
+    }
+    let _ = frames;
+    Ok(Step::Eval(acc, env))
+}
+
+/// `(letrec ((v e) ...) body) ⇒
+///  (let ((v <unspec>) ...) (set! v e) ... body)`.
+/// `letrec*` is treated the same here: the bindings are evaluated in
+/// source order, which is permitted by R7RS for both forms.
+fn step_letrec(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let (bindings_form, body_tail) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("letrec", "expected bindings and body"))?;
+    let bindings = parse_bindings(&bindings_form, "letrec")?;
+    let body = collect_list(&body_tail)
+        .map_err(|()| EvalError::malformed("letrec", "body must be a proper list"))?;
+    if body.is_empty() {
+        return Err(EvalError::malformed("letrec", "body must not be empty"));
+    }
+    // Outer (let ((v <unspec>) ...) ...). The placeholder is
+    // (quote <undefined-letrec-binding>) — a unique symbol so any code
+    // that observes it before the set! ran raises a clear error.
+    let placeholder = Value::list_from([sym("quote"), sym("<undefined-letrec-binding>")]);
+    let undef_binds: Vec<Value> = bindings
+        .iter()
+        .map(|(v, _)| Value::list_from([Value::Symbol(v.clone()), placeholder.clone()]))
+        .collect();
+    let undef_binds_list = Value::list_from(undef_binds);
+
+    // Body: (set! v e) ... body...
+    let mut sets: Vec<Value> = bindings
+        .into_iter()
+        .map(|(v, e)| Value::list_from([sym("set!"), Value::Symbol(v), e]))
+        .collect();
+    sets.extend(body);
+    let outer_body = sets;
+
+    let mut let_items = vec![sym("let"), undef_binds_list];
+    let_items.extend(outer_body);
+    let let_form = Value::list_from(let_items);
+    let _ = frames;
+    Ok(Step::Eval(let_form, env))
+}
+
+/// `(when test body...) ⇒ (if test (begin body...))`. The if-without-alt
+/// returns `Unspecified` on `#f`, matching R7RS §4.2.1.
+fn step_when(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let (test, body_tail) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("when", "expected test and body"))?;
+    let body = collect_list(&body_tail)
+        .map_err(|()| EvalError::malformed("when", "body must be a proper list"))?;
+    if body.is_empty() {
+        return Err(EvalError::malformed("when", "body must not be empty"));
+    }
+    let mut begin_items = vec![sym("begin")];
+    begin_items.extend(body);
+    let begin_form = Value::list_from(begin_items);
+    let if_form = Value::list_from([sym("if"), test, begin_form]);
+    let _ = frames;
+    Ok(Step::Eval(if_form, env))
+}
+
+/// `(unless test body...) ⇒ (if test (if #f #f) (begin body...))`.
+/// `(if #f #f)` is the conventional Scheme "unspecified" — both arms
+/// fall through, so the if returns Unspecified.
+fn step_unless(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let (test, body_tail) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("unless", "expected test and body"))?;
+    let body = collect_list(&body_tail)
+        .map_err(|()| EvalError::malformed("unless", "body must be a proper list"))?;
+    if body.is_empty() {
+        return Err(EvalError::malformed("unless", "body must not be empty"));
+    }
+    let mut begin_items = vec![sym("begin")];
+    begin_items.extend(body);
+    let begin_form = Value::list_from(begin_items);
+    let unspec_form = Value::list_from([sym("if"), Value::Bool(false), Value::Bool(false)]);
+    let if_form = Value::list_from([sym("if"), test, unspec_form, begin_form]);
+    let _ = frames;
+    Ok(Step::Eval(if_form, env))
+}
+
+/// `(cond clause...)`. Walks clauses one at a time, evaluating each
+/// test under a [`Frame::CondClause`].
+fn step_cond(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let clauses = collect_list(&tail)
+        .map_err(|()| EvalError::malformed("cond", "clause list must be proper"))?;
+    cond_dispatch(clauses, env, frames)
+}
+
+fn cond_dispatch(
+    mut clauses: Vec<Value>,
+    env: EnvRef,
+    frames: &mut Vec<Frame>,
+) -> Result<Step, EvalError> {
+    if clauses.is_empty() {
+        return Ok(Step::Return(Value::Unspecified));
+    }
+    let clause = clauses.remove(0);
+    let parts = collect_list(&clause)
+        .map_err(|()| EvalError::malformed("cond", "clause must be a list"))?;
+    if parts.is_empty() {
+        return Err(EvalError::malformed("cond", "empty clause"));
+    }
+    // (else body...)
+    if matches!(&parts[0], Value::Symbol(s) if s.name() == "else") {
+        if parts.len() == 1 {
+            return Err(EvalError::malformed("cond", "else clause needs a body"));
+        }
+        let body = parts.into_iter().skip(1).collect::<Vec<_>>();
+        return Ok(eval_sequence(body, env, frames));
+    }
+    // Normal clause: evaluate the test, then dispatch.
+    let test = parts[0].clone();
+    frames.push(Frame::CondClause {
+        clause: Value::list_from(parts),
+        remaining_clauses: clauses,
+        env: env.clone(),
+    });
+    Ok(Step::Eval(test, env))
+}
+
+/// `(case key clause...)`. Each clause's keys are matched with `eqv?`
+/// against the value of `key`. The `else` clause runs if no key
+/// matches; clauses may also use `=>` like `cond`.
+fn step_case(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let (key_expr, rest) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("case", "expected key and clauses"))?;
+    let clauses = collect_list(&rest)
+        .map_err(|()| EvalError::malformed("case", "clause list must be proper"))?;
+    // Evaluate the key by wrapping it in a let so we only evaluate
+    // it once, then desugar to a cond. The key value is bound to a
+    // private symbol that the user cannot reference.
+    let key_var = Symbol::intern("$case-key");
+    let key_ref = Value::Symbol(key_var.clone());
+    let mut cond_clauses: Vec<Value> = Vec::new();
+    for clause in clauses {
+        let parts = collect_list(&clause)
+            .map_err(|()| EvalError::malformed("case", "clause must be a list"))?;
+        if parts.is_empty() {
+            return Err(EvalError::malformed("case", "empty clause"));
+        }
+        if matches!(&parts[0], Value::Symbol(s) if s.name() == "else") {
+            cond_clauses.push(Value::list_from(parts));
+            continue;
+        }
+        let keys = collect_list(&parts[0])
+            .map_err(|()| EvalError::malformed("case", "clause keys must be a list"))?;
+        // Build (or (eqv? $case-key k1) (eqv? $case-key k2) ...)
+        let mut or_items = vec![sym("or")];
+        for k in keys {
+            // Each key is a literal datum, so wrap with quote.
+            let quoted = Value::list_from([sym("quote"), k]);
+            or_items.push(Value::list_from([sym("eqv?"), key_ref.clone(), quoted]));
+        }
+        let test = Value::list_from(or_items);
+        let mut new_clause = vec![test];
+        new_clause.extend(parts.into_iter().skip(1));
+        cond_clauses.push(Value::list_from(new_clause));
+    }
+    let mut cond_items = vec![sym("cond")];
+    cond_items.extend(cond_clauses);
+    let cond_form = Value::list_from(cond_items);
+
+    let bind = Value::list_from([Value::Symbol(key_var), key_expr]);
+    let binds = Value::list_from([bind]);
+    let let_form = Value::list_from([sym("let"), binds, cond_form]);
+    let _ = frames;
+    Ok(Step::Eval(let_form, env))
+}
+
+/// `(and e1 ... en)` — short-circuit. Last expression is in tail
+/// position.
+fn step_and(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let exprs = collect_list(&tail)
+        .map_err(|()| EvalError::malformed("and", "operand list must be proper"))?;
+    if exprs.is_empty() {
+        return Ok(Step::Return(Value::Bool(true)));
+    }
+    if exprs.len() == 1 {
+        let only = exprs.into_iter().next().unwrap();
+        return Ok(Step::Eval(only, env));
+    }
+    let mut iter = exprs.into_iter();
+    let first = iter.next().unwrap();
+    let remaining: Vec<Value> = iter.collect();
+    frames.push(Frame::AndNext {
+        remaining,
+        env: env.clone(),
+    });
+    Ok(Step::Eval(first, env))
+}
+
+/// `(or e1 ... en)` — short-circuit. Last expression is in tail
+/// position.
+fn step_or(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let exprs = collect_list(&tail)
+        .map_err(|()| EvalError::malformed("or", "operand list must be proper"))?;
+    if exprs.is_empty() {
+        return Ok(Step::Return(Value::Bool(false)));
+    }
+    if exprs.len() == 1 {
+        let only = exprs.into_iter().next().unwrap();
+        return Ok(Step::Eval(only, env));
+    }
+    let mut iter = exprs.into_iter();
+    let first = iter.next().unwrap();
+    let remaining: Vec<Value> = iter.collect();
+    frames.push(Frame::OrNext {
+        remaining,
+        env: env.clone(),
+    });
+    Ok(Step::Eval(first, env))
+}
+
+/// `(do ((var init step) ...) (test result...) body...)`. Desugars to
+/// a `letrec` loop:
+/// `(letrec ((loop (lambda (v...)
+///                   (if test (begin result...)
+///                            (begin body... (loop step...))))))
+///    (loop init...))`
+fn step_do(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let (bindings_form, after_bindings) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("do", "expected bindings, test, body"))?;
+    let (test_clause, body_tail) = after_bindings
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("do", "expected test clause"))?;
+
+    // Parse var/init/step bindings.
+    let binding_list = collect_list(&bindings_form)
+        .map_err(|()| EvalError::malformed("do", "bindings must be a proper list"))?;
+    let mut vars: Vec<Symbol> = Vec::new();
+    let mut inits: Vec<Value> = Vec::new();
+    let mut steps: Vec<Value> = Vec::new();
+    for b in binding_list {
+        let parts =
+            collect_list(&b).map_err(|()| EvalError::malformed("do", "binding must be a list"))?;
+        if parts.len() < 2 || parts.len() > 3 {
+            return Err(EvalError::malformed(
+                "do",
+                "binding must be (var init) or (var init step)",
+            ));
+        }
+        let Value::Symbol(v) = parts[0].clone() else {
+            return Err(EvalError::malformed("do", "binding name must be a symbol"));
+        };
+        vars.push(v.clone());
+        inits.push(parts[1].clone());
+        let step_expr = if parts.len() == 3 {
+            parts[2].clone()
+        } else {
+            Value::Symbol(v)
+        };
+        steps.push(step_expr);
+    }
+
+    // Parse test clause: (test result...).
+    let test_parts = collect_list(&test_clause)
+        .map_err(|()| EvalError::malformed("do", "test clause must be a proper list"))?;
+    if test_parts.is_empty() {
+        return Err(EvalError::malformed(
+            "do",
+            "test clause must include a test",
+        ));
+    }
+    let test_expr = test_parts[0].clone();
+    let result_exprs: Vec<Value> = test_parts.into_iter().skip(1).collect();
+    let result_body = if result_exprs.is_empty() {
+        Value::Unspecified
+    } else if result_exprs.len() == 1 {
+        result_exprs.into_iter().next().unwrap()
+    } else {
+        let mut begin = vec![sym("begin")];
+        begin.extend(result_exprs);
+        Value::list_from(begin)
+    };
+
+    // Parse body.
+    let body_exprs = collect_list(&body_tail)
+        .map_err(|()| EvalError::malformed("do", "body must be a proper list"))?;
+
+    // Build loop body: (begin body... (loop step...))
+    let loop_name = Symbol::intern("$do-loop");
+    let recur_call: Vec<Value> = std::iter::once(Value::Symbol(loop_name.clone()))
+        .chain(steps)
+        .collect();
+    let recur = Value::list_from(recur_call);
+    let mut alt_items = vec![sym("begin")];
+    alt_items.extend(body_exprs);
+    alt_items.push(recur);
+    let alt_body = if alt_items.len() == 2 {
+        // Just (begin recur) — simplify to just recur.
+        alt_items.pop().unwrap()
+    } else {
+        Value::list_from(alt_items)
+    };
+
+    let if_form = Value::list_from([sym("if"), test_expr, result_body, alt_body]);
+    let formals = Value::list_from(vars.iter().cloned().map(Value::Symbol));
+    let lambda_form = Value::list_from([sym("lambda"), formals, if_form]);
+    let letrec_bind = Value::list_from([Value::Symbol(loop_name.clone()), lambda_form]);
+    let letrec_binds = Value::list_from([letrec_bind]);
+    let init_call: Vec<Value> = std::iter::once(Value::Symbol(loop_name))
+        .chain(inits)
+        .collect();
+    let letrec_body = Value::list_from(init_call);
+    let letrec_form = Value::list_from([sym("letrec"), letrec_binds, letrec_body]);
+    let _ = frames;
+    Ok(Step::Eval(letrec_form, env))
+}
+
+/// `(quasiquote template)` — expand the template, treating `unquote`
+/// and `unquote-splicing` as escape hatches. v1 supports single-level
+/// quasiquote only (no nested `` ` ``).
+fn step_quasiquote(template: &Value, env: EnvRef) -> Result<Step, EvalError> {
+    let mut iter = ListIter::new(template.clone());
+    let body = iter
+        .next()
+        .ok_or_else(|| EvalError::malformed("quasiquote", "expected one template"))??;
+    if iter.next().is_some() {
+        return Err(EvalError::malformed(
+            "quasiquote",
+            "expected exactly one template",
+        ));
+    }
+    let value = qq_expand(&body, &env)?;
+    Ok(Step::Return(value))
+}
+
+fn qq_expand(template: &Value, env: &EnvRef) -> Result<Value, EvalError> {
+    match template {
+        Value::Pair(_) => qq_expand_pair(template, env),
+        // Vectors quasiquote element-by-element.
+        Value::Vector(items) => {
+            let items = items.borrow().clone();
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                // Vector elements don't support unquote-splicing per R7RS.
+                out.push(qq_expand(&item, env)?);
+            }
+            Ok(Value::vector(out))
+        }
+        _ => Ok(template.clone()),
+    }
+}
+
+fn qq_expand_pair(template: &Value, env: &EnvRef) -> Result<Value, EvalError> {
+    // Check for (unquote x) as the whole template.
+    if let Some((head, tail)) = template.as_pair()
+        && let Value::Symbol(s) = &head
+        && s.name() == "unquote"
+    {
+        let mut iter = ListIter::new(tail);
+        let expr = iter
+            .next()
+            .ok_or_else(|| EvalError::malformed("unquote", "expected one expression"))??;
+        return eval(expr, env.clone());
+    }
+    // Otherwise, walk car and cdr.
+    let (head, tail) = template.as_pair().expect("pair");
+    // Check if head is (unquote-splicing x) — then splice into the
+    // result of recursing on tail.
+    if let Some((h_head, h_tail)) = head.as_pair()
+        && let Value::Symbol(s) = &h_head
+        && s.name() == "unquote-splicing"
+    {
+        let mut iter = ListIter::new(h_tail);
+        let expr = iter
+            .next()
+            .ok_or_else(|| EvalError::malformed("unquote-splicing", "expected one expression"))??;
+        let spliced = eval(expr, env.clone())?;
+        let tail_expanded = qq_expand(&tail, env)?;
+        return append_lists(spliced, tail_expanded);
+    }
+    let head_expanded = qq_expand(&head, env)?;
+    let tail_expanded = qq_expand(&tail, env)?;
+    Ok(Value::cons(head_expanded, tail_expanded))
+}
+
+fn append_lists(front: Value, back: Value) -> Result<Value, EvalError> {
+    // Walk `front` and replace its tail with `back`. front must be a
+    // proper list.
+    let mut items: Vec<Value> = Vec::new();
+    let mut cur = front;
+    loop {
+        match cur {
+            Value::Null => break,
+            Value::Pair(p) => {
+                let pair = p.borrow();
+                items.push(pair.car.clone());
+                cur = pair.cdr.clone();
+            }
+            _ => {
+                return Err(EvalError::malformed(
+                    "unquote-splicing",
+                    "spliced value must be a proper list",
+                ));
+            }
+        }
+    }
+    let mut acc = back;
+    for item in items.into_iter().rev() {
+        acc = Value::cons(item, acc);
+    }
+    Ok(acc)
+}
+
+/// Parse a binding list `((v1 e1) (v2 e2) ...)`.
+fn parse_bindings(form: &Value, context: &'static str) -> Result<Vec<(Symbol, Value)>, EvalError> {
+    let bindings = collect_list(form)
+        .map_err(|()| EvalError::malformed(context, "binding list must be a proper list"))?;
+    let mut out = Vec::with_capacity(bindings.len());
+    for b in bindings {
+        let parts = collect_list(&b)
+            .map_err(|()| EvalError::malformed(context, "each binding must be a list"))?;
+        if parts.len() != 2 {
+            return Err(EvalError::malformed(
+                context,
+                "each binding must be (name value)",
+            ));
+        }
+        let Value::Symbol(name) = parts[0].clone() else {
+            return Err(EvalError::malformed(
+                context,
+                "binding name must be a symbol",
+            ));
+        };
+        out.push((name, parts[1].clone()));
+    }
+    Ok(out)
+}
+
+/// Helper: shortcut for building a `Symbol` value.
+fn sym(name: &str) -> Value {
+    Value::Symbol(Symbol::intern(name))
+}
+
+/// Helper: build a list from a slice of items, returning a constructor
+/// that lets you add a body tail via `.into_proper(body_items)`.
+struct ListBuilder {
+    head_items: Vec<Value>,
+}
+
+impl ListBuilder {
+    fn into_proper(self, body: Vec<Value>) -> Value {
+        let mut items = self.head_items;
+        items.extend(body);
+        Value::list_from(items)
+    }
+}
+
+fn list_from_parts(items: &[Value]) -> ListBuilder {
+    ListBuilder {
+        head_items: items.to_vec(),
+    }
+}
+
+// ---------------------------------------------------------------------
 // Procedure call
 // ---------------------------------------------------------------------
 
@@ -540,6 +1113,81 @@ fn resume(frame: Frame, value: Value, frames: &mut Vec<Frame>) -> Result<Step, E
             });
             Ok(Step::Eval(next, env))
         }
+        Frame::CondClause {
+            clause,
+            remaining_clauses,
+            env,
+        } => {
+            // `value` is the result of evaluating the clause's test.
+            let parts = collect_list(&clause)
+                .map_err(|()| EvalError::malformed("cond", "clause must be a list"))?;
+            // parts[0] is the test, parts[1..] is the body (or => proc).
+            if value.is_truthy() {
+                if parts.len() == 1 {
+                    // Single-test clause: return the test value.
+                    return Ok(Step::Return(value));
+                }
+                // (test => proc-expr)
+                if parts.len() == 3 && matches!(&parts[1], Value::Symbol(s) if s.name() == "=>") {
+                    let proc_expr = parts[2].clone();
+                    frames.push(Frame::CondArrow {
+                        test_value: value,
+                        env: env.clone(),
+                    });
+                    return Ok(Step::Eval(proc_expr, env));
+                }
+                // (test body...)
+                let body: Vec<Value> = parts.into_iter().skip(1).collect();
+                return Ok(eval_sequence(body, env, frames));
+            }
+            // Falsy — try the next clause.
+            cond_dispatch(remaining_clauses, env, frames)
+        }
+        Frame::CondArrow { test_value, env } => {
+            // `value` is the => procedure. Apply it to the test value.
+            // Apply is in tail position: no frame pushed here.
+            let _ = env;
+            Ok(Step::Apply(value, vec![test_value]))
+        }
+        Frame::AndNext { mut remaining, env } => {
+            // Short-circuit: if the just-evaluated expression is #f,
+            // return #f without evaluating the rest.
+            if !value.is_truthy() {
+                return Ok(Step::Return(value));
+            }
+            // Otherwise: continue. If only one expr left, that's tail
+            // position — Eval without re-pushing.
+            if remaining.is_empty() {
+                // Shouldn't happen — step_and never pushes AndNext when
+                // there are 0 remaining. But guard anyway.
+                return Ok(Step::Return(value));
+            }
+            let next = remaining.remove(0);
+            if !remaining.is_empty() {
+                frames.push(Frame::AndNext {
+                    remaining,
+                    env: env.clone(),
+                });
+            }
+            Ok(Step::Eval(next, env))
+        }
+        Frame::OrNext { mut remaining, env } => {
+            // Short-circuit: if truthy, return the value immediately.
+            if value.is_truthy() {
+                return Ok(Step::Return(value));
+            }
+            if remaining.is_empty() {
+                return Ok(Step::Return(value));
+            }
+            let next = remaining.remove(0);
+            if !remaining.is_empty() {
+                frames.push(Frame::OrNext {
+                    remaining,
+                    env: env.clone(),
+                });
+            }
+            Ok(Step::Eval(next, env))
+        }
     }
 }
 
@@ -698,7 +1346,7 @@ mod tests {
                     Value::Int(n) => {
                         acc = acc
                             .checked_add(*n)
-                            .ok_or_else(|| RuntimeError::Other("integer overflow in +".into()))?
+                            .ok_or_else(|| RuntimeError::Other("integer overflow in +".into()))?;
                     }
                     other => {
                         return Err(RuntimeError::Type {
@@ -730,7 +1378,7 @@ mod tests {
                     Value::Int(n) => {
                         acc = acc
                             .checked_sub(*n)
-                            .ok_or_else(|| RuntimeError::Other("integer overflow in -".into()))?
+                            .ok_or_else(|| RuntimeError::Other("integer overflow in -".into()))?;
                     }
                     other => {
                         return Err(RuntimeError::Type {
@@ -749,7 +1397,7 @@ mod tests {
                     Value::Int(n) => {
                         acc = acc
                             .checked_mul(*n)
-                            .ok_or_else(|| RuntimeError::Other("integer overflow in *".into()))?
+                            .ok_or_else(|| RuntimeError::Other("integer overflow in *".into()))?;
                     }
                     other => {
                         return Err(RuntimeError::Type {
@@ -814,6 +1462,23 @@ mod tests {
         });
         intern_def(&env, "list", Arity::AtLeast(0), |args| {
             Ok(Value::list_from(args.iter().cloned()))
+        });
+        intern_def(&env, "eqv?", Arity::Exact(2), |args| {
+            Ok(Value::Bool(crate::value::eqv(&args[0], &args[1])))
+        });
+        intern_def(&env, "car", Arity::Exact(1), |args| match &args[0] {
+            Value::Pair(p) => Ok(p.borrow().car.clone()),
+            other => Err(RuntimeError::Type {
+                expected: "pair".into(),
+                got: other.type_name().into(),
+            }),
+        });
+        intern_def(&env, "cdr", Arity::Exact(1), |args| match &args[0] {
+            Value::Pair(p) => Ok(p.borrow().cdr.clone()),
+            other => Err(RuntimeError::Type {
+                expected: "pair".into(),
+                got: other.type_name().into(),
+            }),
         });
         env
     }
@@ -1030,5 +1695,223 @@ mod tests {
             err,
             EvalError::MalformedForm { form: "define", .. }
         ));
+    }
+
+    // -- T8 derived forms -------------------------------------------
+
+    // -- let, let*, letrec ------------------------------------------
+
+    #[test]
+    fn let_binds_locally() {
+        assert!(equal(
+            &run("(let ((x 1) (y 2)) (+ x y))").unwrap(),
+            &Value::Int(3)
+        ));
+    }
+
+    #[test]
+    fn let_bindings_evaluated_in_outer_scope() {
+        // `y` in the binding for `b` refers to the outer `y`, not the let's `y`.
+        let src = "(define y 10) (let ((y 99) (z y)) z)";
+        assert!(equal(&run(src).unwrap(), &Value::Int(10)));
+    }
+
+    #[test]
+    fn let_star_sees_earlier_bindings() {
+        let src = "(let* ((x 1) (y (+ x 1)) (z (+ y 1))) z)";
+        assert!(equal(&run(src).unwrap(), &Value::Int(3)));
+    }
+
+    #[test]
+    fn letrec_mutual_recursion() {
+        let src = "(letrec ((even? (lambda (n) (if (= n 0) #t (odd? (- n 1)))))
+                            (odd?  (lambda (n) (if (= n 0) #f (even? (- n 1))))))
+                     (even? 6))";
+        assert!(equal(&run(src).unwrap(), &Value::Bool(true)));
+    }
+
+    #[test]
+    fn named_let_loop() {
+        // (let loop ((i 0) (acc 0)) (if (= i 5) acc (loop (+ i 1) (+ acc i))))
+        let src = "(let loop ((i 0) (acc 0)) (if (= i 5) acc (loop (+ i 1) (+ acc i))))";
+        // 0+1+2+3+4 = 10
+        assert!(equal(&run(src).unwrap(), &Value::Int(10)));
+    }
+
+    // -- cond -------------------------------------------------------
+
+    #[test]
+    fn cond_picks_first_truthy_branch() {
+        assert!(equal(
+            &run("(cond (#f 1) (#t 2) (else 3))").unwrap(),
+            &Value::Int(2),
+        ));
+    }
+
+    #[test]
+    fn cond_falls_through_to_else() {
+        assert!(equal(
+            &run("(cond (#f 1) (#f 2) (else 99))").unwrap(),
+            &Value::Int(99),
+        ));
+    }
+
+    #[test]
+    fn cond_returns_unspecified_when_no_match() {
+        let v = run("(cond (#f 1) (#f 2))").unwrap();
+        assert!(matches!(v, Value::Unspecified));
+    }
+
+    #[test]
+    fn cond_single_test_clause_returns_test_value() {
+        assert!(equal(
+            &run("(cond ((+ 1 2)) (else 99))").unwrap(),
+            &Value::Int(3),
+        ));
+    }
+
+    #[test]
+    fn cond_arrow_applies_proc_to_test_value() {
+        // (cond ((list 1 2) => cdr) (else 'no))
+        // cdr of (1 2) is (2)
+        let v = run("(cond ((list 1 2) => cdr) (else 'no))").unwrap();
+        let expected = Value::list_from([Value::Int(2)]);
+        assert!(equal(&v, &expected));
+    }
+
+    #[test]
+    fn cond_test_evaluated_only_once_for_arrow() {
+        // If the test was evaluated twice, the counter would be 2.
+        let src = "(define counter 0)
+                   (define (bump) (set! counter (+ counter 1)) (list counter))
+                   (cond ((bump) => car) (else 'no))
+                   counter";
+        // bump increments counter to 1, returns (1). The => applies car to (1) → 1.
+        // counter at end should be 1, not 2.
+        assert!(equal(&run(src).unwrap(), &Value::Int(1)));
+    }
+
+    // -- case -------------------------------------------------------
+
+    #[test]
+    fn case_matches_first_key_list() {
+        assert!(equal(
+            &run("(case 2 ((1 2 3) 'low) ((4 5) 'high) (else 'other))").unwrap(),
+            &Value::Symbol(Symbol::intern("low")),
+        ));
+    }
+
+    #[test]
+    fn case_falls_through_to_else() {
+        assert!(equal(
+            &run("(case 99 ((1 2) 'a) ((3 4) 'b) (else 'other))").unwrap(),
+            &Value::Symbol(Symbol::intern("other")),
+        ));
+    }
+
+    #[test]
+    fn case_uses_eqv_not_equal() {
+        // (case (list 1 2 3) (((1 2 3)) 'a) (else 'b))
+        // The clause key is the literal list (1 2 3) which is NOT eqv?
+        // to a freshly-allocated list. So we should hit else.
+        let v = run("(case (list 1 2 3) (((1 2 3)) 'a) (else 'b))").unwrap();
+        assert!(equal(&v, &Value::Symbol(Symbol::intern("b"))));
+    }
+
+    // -- and / or ---------------------------------------------------
+
+    #[test]
+    fn empty_and_is_true() {
+        assert!(equal(&run("(and)").unwrap(), &Value::Bool(true)));
+    }
+
+    #[test]
+    fn empty_or_is_false() {
+        assert!(equal(&run("(or)").unwrap(), &Value::Bool(false)));
+    }
+
+    #[test]
+    fn and_returns_last_truthy_value() {
+        // (and 1 2 3) -> 3
+        assert!(equal(&run("(and 1 2 3)").unwrap(), &Value::Int(3)));
+    }
+
+    #[test]
+    fn and_short_circuits_on_false() {
+        assert!(equal(&run("(and 1 #f 3)").unwrap(), &Value::Bool(false)));
+    }
+
+    #[test]
+    fn or_returns_first_truthy_value() {
+        assert!(equal(&run("(or #f #f 7)").unwrap(), &Value::Int(7)));
+    }
+
+    #[test]
+    fn or_returns_last_falsy_when_all_false() {
+        assert!(equal(&run("(or #f #f)").unwrap(), &Value::Bool(false)));
+    }
+
+    // -- when / unless ----------------------------------------------
+
+    #[test]
+    fn when_runs_body_when_true() {
+        let src = "(define x 0) (when #t (set! x 99)) x";
+        assert!(equal(&run(src).unwrap(), &Value::Int(99)));
+    }
+
+    #[test]
+    fn when_skips_body_when_false() {
+        let src = "(define x 0) (when #f (set! x 99)) x";
+        assert!(equal(&run(src).unwrap(), &Value::Int(0)));
+    }
+
+    #[test]
+    fn unless_inverse_of_when() {
+        let src = "(define x 0) (unless #f (set! x 99)) x";
+        assert!(equal(&run(src).unwrap(), &Value::Int(99)));
+        let src = "(define x 0) (unless #t (set! x 99)) x";
+        assert!(equal(&run(src).unwrap(), &Value::Int(0)));
+    }
+
+    // -- do ---------------------------------------------------------
+
+    #[test]
+    fn do_sums_first_n() {
+        let src = "(do ((i 0 (+ i 1)) (acc 0 (+ acc i)))
+                       ((= i 10) acc))";
+        // sum 0..9 = 45
+        assert!(equal(&run(src).unwrap(), &Value::Int(45)));
+    }
+
+    #[test]
+    fn do_with_no_step_keeps_var() {
+        // step omitted defaults to var itself (unchanged).
+        let src = "(do ((i 5) (n 0 (+ n 1)))
+                       ((= n 3) i))";
+        assert!(equal(&run(src).unwrap(), &Value::Int(5)));
+    }
+
+    // -- quasiquote -------------------------------------------------
+
+    #[test]
+    fn quasiquote_with_no_unquote_is_just_quote() {
+        let v = run("`(1 2 3)").unwrap();
+        let expected = Value::list_from([Value::Int(1), Value::Int(2), Value::Int(3)]);
+        assert!(equal(&v, &expected));
+    }
+
+    #[test]
+    fn quasiquote_unquote_evaluates_inserted_value() {
+        let v = run("(define x 99) `(1 ,x 3)").unwrap();
+        let expected = Value::list_from([Value::Int(1), Value::Int(99), Value::Int(3)]);
+        assert!(equal(&v, &expected));
+    }
+
+    #[test]
+    fn quasiquote_unquote_splicing_appends_list() {
+        let v = run("`(1 ,@(list 2 3) 4)").unwrap();
+        let expected =
+            Value::list_from([Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)]);
+        assert!(equal(&v, &expected));
     }
 }

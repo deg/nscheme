@@ -55,7 +55,7 @@ fn base_env() -> EnvRef {
                 Value::Int(n) => {
                     acc = acc
                         .checked_sub(*n)
-                        .ok_or_else(|| RuntimeError::Other("integer overflow in -".into()))?
+                        .ok_or_else(|| RuntimeError::Other("integer overflow in -".into()))?;
                 }
                 other => {
                     return Err(RuntimeError::Type {
