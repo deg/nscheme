@@ -4,6 +4,7 @@
 //! that consumes this library; all language behavior lives here so the
 //! interpreter can be embedded in other Rust applications.
 
+pub mod env;
 pub mod lex;
 pub mod parse;
 pub mod value;
