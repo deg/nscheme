@@ -51,7 +51,7 @@ use crate::value::{Pair, Procedure, RuntimeError, Symbol, Value};
 /// Errors raised during evaluation. Wraps [`RuntimeError`] (primitive /
 /// lookup failures) and [`ParseError`] for convenience APIs that go
 /// straight from source to result.
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[derive(Clone, Debug, Error)]
 pub enum EvalError {
     #[error("{0}")]
     Runtime(#[from] RuntimeError),
@@ -61,6 +61,11 @@ pub enum EvalError {
 
     #[error("malformed special form `{form}`: {message}")]
     MalformedForm { form: &'static str, message: String },
+
+    /// An uncaught `raise` — bubbled out past the outermost handler.
+    /// The payload is whatever value was passed to `raise`.
+    #[error("unhandled raise: {0}")]
+    Raised(Value),
 }
 
 impl EvalError {
@@ -88,6 +93,13 @@ enum Step {
     /// resume by returning `value`. Used to invoke a continuation
     /// captured by `call/cc`.
     InvokeContinuation(Vec<Frame>, Value),
+    /// Propagate an exception up the frame stack until an
+    /// [`Frame::ExceptionHandler`] catches it. If none catches, the
+    /// `eval()` function returns an `EvalError::Raised(value)`. The
+    /// boolean is `true` for `raise-continuable`: when set, a handler
+    /// that returns normally substitutes its result for the raise
+    /// expression. Otherwise the handler's result is re-raised.
+    Raise(Value, bool),
 }
 
 /// Pending work that resumes when a sub-evaluation returns.
@@ -147,6 +159,24 @@ pub enum Frame {
         remaining: Vec<Value>,
         env: EnvRef,
     },
+    /// An exception handler installed by `with-exception-handler`.
+    /// When a `Step::Raise(v, _)` propagates up, the handler is
+    /// invoked with `v`. Whether the handler's return value is
+    /// substituted (for `raise-continuable`) or re-raised (for plain
+    /// `raise`) is decided by the `continuable` flag carried by the
+    /// raise itself, not the handler.
+    ExceptionHandler { handler: Value, env: EnvRef },
+    /// Helper frame: when a non-continuable handler returns, re-raise
+    /// the value to the next outer handler.
+    ReRaise,
+    /// Pending raise. When the operand of `raise` /
+    /// `raise-continuable` finishes evaluating, this frame fires
+    /// `Step::Raise(value, continuable)`.
+    RaiseAfter { continuable: bool },
+    /// Helper for `with-exception-handler`: when the handler
+    /// expression has finished evaluating, install it as an
+    /// `ExceptionHandler` frame and call the thunk.
+    InstallHandler { thunk_expr: Value, env: EnvRef },
 }
 
 // ---------------------------------------------------------------------
@@ -170,6 +200,39 @@ pub fn eval(expr: Value, env: EnvRef) -> Result<Value, EvalError> {
             Step::InvokeContinuation(saved, value) => {
                 frames = saved;
                 Step::Return(value)
+            }
+            Step::Raise(value, continuable) => {
+                // Walk the frame stack looking for an ExceptionHandler.
+                // For raise-continuable we preserve the frames between
+                // the raise and the handler so the handler's return
+                // value substitutes for the raise expression. For plain
+                // raise we discard them and push ReRaise so the
+                // handler's return is re-raised.
+                let mut popped: Vec<Frame> = Vec::new();
+                let mut handler_found = None;
+                while let Some(frame) = frames.pop() {
+                    if let Frame::ExceptionHandler { handler, env: _ } = frame {
+                        handler_found = Some(handler);
+                        break;
+                    }
+                    popped.push(frame);
+                }
+                match handler_found {
+                    Some(handler) => {
+                        if continuable {
+                            // Restore the frames between handler and
+                            // raise so the handler's result resumes at
+                            // the raise expression's position.
+                            for f in popped.into_iter().rev() {
+                                frames.push(f);
+                            }
+                        } else {
+                            frames.push(Frame::ReRaise);
+                        }
+                        Step::Apply(handler, vec![value])
+                    }
+                    None => return Err(EvalError::Raised(value)),
+                }
             }
         };
     }
@@ -214,7 +277,8 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
         | Value::Unspecified
         | Value::Procedure(_)
         | Value::Port(_)
-        | Value::Macro(_) => return Ok(Step::Return(expr)),
+        | Value::Macro(_)
+        | Value::ErrorObject(_) => return Ok(Step::Return(expr)),
         Value::Symbol(sym) => {
             let v = env.lookup(sym).ok_or_else(|| {
                 EvalError::Runtime(RuntimeError::Undefined(sym.name().to_string()))
@@ -263,6 +327,12 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
                 return step_call_cc(tail, env, frames);
             }
             "apply" => return step_apply_form(tail, env, frames),
+            "raise" => return step_raise_with_frames(tail, env, false, frames),
+            "raise-continuable" => return step_raise_with_frames(tail, env, true, frames),
+            "with-exception-handler" => {
+                return step_with_exception_handler_real(tail, env, frames);
+            }
+            "guard" => return step_guard_real(tail, env, frames),
             _ => { /* fall through to procedure call or macro */ }
         }
         // Macro application: if the head symbol resolves to a Macro
@@ -488,6 +558,150 @@ fn step_apply_form(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<
         env: env.clone(),
     });
     Ok(Step::Eval(proc_expr, env))
+}
+
+/// `(raise expr)` / `(raise-continuable expr)` — evaluate `expr`, then
+/// propagate it up the frame stack as an exception. The boolean
+/// `continuable` is `true` for `raise-continuable` (R7RS §6.11), in
+/// which case a handler that returns substitutes its return value for
+/// the `raise` expression rather than re-raising.
+fn step_raise_with_frames(
+    tail: Value,
+    env: EnvRef,
+    continuable: bool,
+    frames: &mut Vec<Frame>,
+) -> Result<Step, EvalError> {
+    let mut iter = ListIter::new(tail);
+    let expr = iter
+        .next()
+        .ok_or_else(|| EvalError::malformed("raise", "expected one operand"))??;
+    if iter.next().is_some() {
+        return Err(EvalError::malformed(
+            "raise",
+            "expected exactly one operand",
+        ));
+    }
+    frames.push(Frame::RaiseAfter { continuable });
+    Ok(Step::Eval(expr, env))
+}
+
+/// `(with-exception-handler handler thunk)` — install `handler` for
+/// the dynamic extent of `(thunk)`. On normal return from `thunk`,
+/// the handler is discarded. On `raise`, the handler is invoked with
+/// the raised value.
+///
+/// Strategy: synthesize a small lambda `((lambda (h t) ...) handler
+/// thunk)` so handler and thunk get evaluated first. Then in the body
+/// we push an `ExceptionHandler` frame holding `h` and apply `t`.
+/// For clarity we do this more directly: evaluate handler, then via a
+/// helper frame install + call.
+fn step_with_exception_handler_real(
+    tail: Value,
+    env: EnvRef,
+    frames: &mut Vec<Frame>,
+) -> Result<Step, EvalError> {
+    let mut iter = ListIter::new(tail);
+    let handler_expr = iter.next().ok_or_else(|| {
+        EvalError::malformed("with-exception-handler", "expected handler and thunk")
+    })??;
+    let thunk_expr = iter.next().ok_or_else(|| {
+        EvalError::malformed("with-exception-handler", "expected handler and thunk")
+    })??;
+    if iter.next().is_some() {
+        return Err(EvalError::malformed(
+            "with-exception-handler",
+            "expected exactly two operands",
+        ));
+    }
+    // Push InstallHandler frame; first child eval is the handler.
+    frames.push(Frame::InstallHandler {
+        thunk_expr,
+        env: env.clone(),
+    });
+    Ok(Step::Eval(handler_expr, env))
+}
+
+/// `(guard (cond-var clause...) body...)` — structured exception
+/// handling. Desugars to:
+///   (call/cc
+///     (lambda (k)
+///       (with-exception-handler
+///         (lambda (var) (k (cond clause... (else (raise var)))))
+///         (lambda () body...))))
+///
+/// On normal return from `body`, call/cc just returns the body's
+/// value. On a raise, the handler runs the cond — its result is
+/// passed back through `k` to escape the handler's dynamic extent
+/// (so a re-raise via the else clause goes to the next outer handler,
+/// not back into ourselves).
+fn step_guard_real(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let (header, body_tail) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("guard", "expected (var clause...) and body"))?;
+    let header_parts = collect_list(&header)
+        .map_err(|()| EvalError::malformed("guard", "header must be a proper list"))?;
+    if header_parts.is_empty() {
+        return Err(EvalError::malformed(
+            "guard",
+            "header must start with a variable",
+        ));
+    }
+    let Value::Symbol(var) = header_parts[0].clone() else {
+        return Err(EvalError::malformed(
+            "guard",
+            "guard variable must be a symbol",
+        ));
+    };
+    let clauses: Vec<Value> = header_parts.into_iter().skip(1).collect();
+    let body = collect_list(&body_tail)
+        .map_err(|()| EvalError::malformed("guard", "body must be a proper list"))?;
+    if body.is_empty() {
+        return Err(EvalError::malformed("guard", "body must not be empty"));
+    }
+
+    let mksym = |s: &str| Value::Symbol(Symbol::intern(s));
+    let var_v = Value::Symbol(var);
+
+    // (cond clause... (else (raise var)))
+    let mut cond_items = vec![mksym("cond")];
+    cond_items.extend(clauses);
+    cond_items.push(Value::list_from([
+        mksym("else"),
+        Value::list_from([mksym("raise"), var_v.clone()]),
+    ]));
+    let cond_form = Value::list_from(cond_items);
+
+    // Body as a single expression.
+    let body_expr = if body.len() == 1 {
+        body.into_iter().next().unwrap()
+    } else {
+        let mut begin = vec![mksym("begin")];
+        begin.extend(body);
+        Value::list_from(begin)
+    };
+
+    let k_sym = mksym("$guard-k");
+    let var_param = Value::list_from([var_v.clone()]);
+    // (lambda (var) (k (cond ...)))
+    let handler_lambda = Value::list_from([
+        mksym("lambda"),
+        var_param,
+        Value::list_from([k_sym.clone(), cond_form]),
+    ]);
+    // (lambda () body)
+    let thunk_lambda = Value::list_from([mksym("lambda"), Value::Null, body_expr]);
+    // (with-exception-handler handler thunk)
+    let weh = Value::list_from([
+        mksym("with-exception-handler"),
+        handler_lambda,
+        thunk_lambda,
+    ]);
+    // (lambda (k) weh)
+    let outer_lambda = Value::list_from([mksym("lambda"), Value::list_from([k_sym]), weh]);
+    // (call/cc outer-lambda)
+    let call_cc = Value::list_from([mksym("call/cc"), outer_lambda]);
+    let _ = frames;
+    Ok(Step::Eval(call_cc, env))
 }
 
 /// `(call/cc proc)` — capture the current continuation and apply
@@ -1573,6 +1787,24 @@ fn resume(frame: Frame, value: Value, frames: &mut Vec<Frame>) -> Result<Step, E
                 });
             }
             Ok(Step::Eval(next, env))
+        }
+        Frame::ExceptionHandler { .. } => {
+            // The protected expression returned normally; discard the
+            // handler.
+            Ok(Step::Return(value))
+        }
+        Frame::ReRaise => Ok(Step::Raise(value, false)),
+        Frame::RaiseAfter { continuable } => Ok(Step::Raise(value, continuable)),
+        Frame::InstallHandler { thunk_expr, env } => {
+            // `value` is the evaluated handler. Install it and call
+            // (thunk).
+            frames.push(Frame::ExceptionHandler {
+                handler: value,
+                env: env.clone(),
+            });
+            // Construct (thunk) as a call form.
+            let call_form = Value::list_from([thunk_expr]);
+            Ok(Step::Eval(call_form, env))
         }
         Frame::ApplySpread {
             mut evaluated,

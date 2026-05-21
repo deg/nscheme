@@ -354,6 +354,24 @@ pub enum Value {
     /// `Step::Eval(expanded, env)` — no frame pushed, expansion is
     /// purely syntactic. See `crate::macros::SyntaxRules`.
     Macro(Rc<crate::macros::SyntaxRules>),
+    /// An R7RS error object (`error`, `error-object?`, etc.).
+    ErrorObject(Rc<ErrorObject>),
+}
+
+/// Payload behind [`Value::ErrorObject`].
+#[derive(Debug)]
+pub struct ErrorObject {
+    pub message: String,
+    pub irritants: Vec<Value>,
+    pub kind: ErrorKind,
+}
+
+/// Tag used by R7RS predicates like `read-error?` and `file-error?`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErrorKind {
+    User,
+    Read,
+    File,
 }
 
 impl Value {
@@ -490,6 +508,7 @@ impl Value {
             Self::Procedure(_) => "procedure",
             Self::Port(_) => "port",
             Self::Macro(_) => "macro",
+            Self::ErrorObject(_) => "error-object",
         }
     }
 }
@@ -523,6 +542,7 @@ pub fn eq(a: &Value, b: &Value) -> bool {
         (Value::Procedure(x), Value::Procedure(y)) => Rc::ptr_eq(x, y),
         (Value::Port(x), Value::Port(y)) => Rc::ptr_eq(x, y),
         (Value::Macro(x), Value::Macro(y)) => Rc::ptr_eq(x, y),
+        (Value::ErrorObject(x), Value::ErrorObject(y)) => Rc::ptr_eq(x, y),
         _ => false,
     }
 }
@@ -681,6 +701,13 @@ fn write_value(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt::Res
         Value::Procedure(p) => write!(f, "#<procedure {}>", p.name()),
         Value::Port(_) => f.write_str("#<port>"),
         Value::Macro(_) => f.write_str("#<macro>"),
+        Value::ErrorObject(e) => {
+            write!(f, "#<error: {}", e.message)?;
+            for i in &e.irritants {
+                write!(f, " {i}")?;
+            }
+            f.write_str(">")
+        }
     }
 }
 

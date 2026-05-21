@@ -800,6 +800,64 @@ fn install_misc(env: &EnvRef) {
                 .map(|s| Value::Symbol(Symbol::intern(s))),
         ))
     });
+    define(env, "error-object?", Arity::Exact(1), |a| {
+        Ok(Value::Bool(matches!(a[0], Value::ErrorObject(_))))
+    });
+    define(env, "error-object-message", Arity::Exact(1), |a| {
+        match &a[0] {
+            Value::ErrorObject(e) => Ok(Value::string(e.message.clone())),
+            other => Err(RuntimeError::Type {
+                expected: "error-object".into(),
+                got: other.type_name().into(),
+            }),
+        }
+    });
+    define(
+        env,
+        "error-object-irritants",
+        Arity::Exact(1),
+        |a| match &a[0] {
+            Value::ErrorObject(e) => Ok(Value::list_from(e.irritants.iter().cloned())),
+            other => Err(RuntimeError::Type {
+                expected: "error-object".into(),
+                got: other.type_name().into(),
+            }),
+        },
+    );
+    define(env, "read-error?", Arity::Exact(1), |a| {
+        Ok(Value::Bool(matches!(
+            &a[0],
+            Value::ErrorObject(e) if e.kind == crate::value::ErrorKind::Read
+        )))
+    });
+    define(env, "file-error?", Arity::Exact(1), |a| {
+        Ok(Value::Bool(matches!(
+            &a[0],
+            Value::ErrorObject(e) if e.kind == crate::value::ErrorKind::File
+        )))
+    });
+    // `error` constructs an ErrorObject from a message string + irritants.
+    // It does NOT itself raise — the user calls (raise (error "msg" ...))
+    // or wraps with our convenience `error/raise` (the bootstrap defines
+    // an `error` that raises directly).
+    define(env, "make-error-object", Arity::AtLeast(1), |args| {
+        let msg = match &args[0] {
+            Value::String(s) => s.borrow().clone(),
+            Value::Symbol(s) => s.name().to_string(),
+            other => {
+                return Err(RuntimeError::Type {
+                    expected: "string".into(),
+                    got: other.type_name().into(),
+                });
+            }
+        };
+        let irritants: Vec<Value> = args.iter().skip(1).cloned().collect();
+        Ok(Value::ErrorObject(Rc::new(crate::value::ErrorObject {
+            message: msg,
+            irritants,
+            kind: crate::value::ErrorKind::User,
+        })))
+    });
 }
 
 // ---------------------------------------------------------------------
@@ -1356,6 +1414,9 @@ const BOOTSTRAP: &str = r"
     (after)
     result))
 
+;; (error msg arg ...) — build an error-object and raise it.
+(define (error msg . irritants)
+  (raise (apply make-error-object msg irritants)))
 ";
 
 // ---------------------------------------------------------------------
