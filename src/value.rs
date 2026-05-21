@@ -338,6 +338,12 @@ pub enum Value {
     Procedure(Rc<Procedure>),
     /// An I/O port.
     Port(Rc<RefCell<Port>>),
+    /// A `syntax-rules` macro transformer. When `step_eval` encounters
+    /// `(head args...)` where `head` resolves to a `Macro`, it expands
+    /// the call by matching `args...` against the patterns and emits
+    /// `Step::Eval(expanded, env)` — no frame pushed, expansion is
+    /// purely syntactic. See `crate::macros::SyntaxRules`.
+    Macro(Rc<crate::macros::SyntaxRules>),
 }
 
 impl Value {
@@ -473,6 +479,7 @@ impl Value {
             Self::Bytevector(_) => "bytevector",
             Self::Procedure(_) => "procedure",
             Self::Port(_) => "port",
+            Self::Macro(_) => "macro",
         }
     }
 }
@@ -505,6 +512,7 @@ pub fn eq(a: &Value, b: &Value) -> bool {
         (Value::Bytevector(x), Value::Bytevector(y)) => Rc::ptr_eq(x, y),
         (Value::Procedure(x), Value::Procedure(y)) => Rc::ptr_eq(x, y),
         (Value::Port(x), Value::Port(y)) => Rc::ptr_eq(x, y),
+        (Value::Macro(x), Value::Macro(y)) => Rc::ptr_eq(x, y),
         _ => false,
     }
 }
@@ -662,6 +670,7 @@ fn write_value(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt::Res
         }
         Value::Procedure(p) => write!(f, "#<procedure {}>", p.name()),
         Value::Port(_) => f.write_str("#<port>"),
+        Value::Macro(_) => f.write_str("#<macro>"),
     }
 }
 

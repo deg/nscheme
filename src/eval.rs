@@ -189,7 +189,8 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
         | Value::Eof
         | Value::Unspecified
         | Value::Procedure(_)
-        | Value::Port(_) => return Ok(Step::Return(expr)),
+        | Value::Port(_)
+        | Value::Macro(_) => return Ok(Step::Return(expr)),
         Value::Symbol(sym) => {
             let v = env.lookup(sym).ok_or_else(|| {
                 EvalError::Runtime(RuntimeError::Undefined(sym.name().to_string()))
@@ -229,11 +230,80 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
             "unless" => return step_unless(tail, env, frames),
             "do" => return step_do(tail, env, frames),
             "quasiquote" => return step_quasiquote(&tail, env),
-            _ => { /* fall through to procedure call */ }
+            "define-syntax" => return step_define_syntax(tail, env),
+            "let-syntax" | "letrec-syntax" => return step_let_syntax(tail, env, frames),
+            _ => { /* fall through to procedure call or macro */ }
+        }
+        // Macro application: if the head symbol resolves to a Macro
+        // value, expand and re-evaluate.
+        if let Some(Value::Macro(rules)) = env.lookup(sym) {
+            let args = collect_list(&tail)
+                .map_err(|()| EvalError::malformed("macro", "argument list must be proper"))?;
+            // Reconstruct the full call form (head + args) for matching.
+            let call_form = Value::cons(Value::Symbol(sym.clone()), Value::list_from(args));
+            let expanded = crate::macros::expand(&rules, &call_form)?;
+            return Ok(Step::Eval(expanded, env));
         }
     }
 
     step_call(head, tail, env, frames)
+}
+
+/// `(define-syntax name (syntax-rules ...))` — install a macro.
+fn step_define_syntax(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
+    let (name_val, rest) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("define-syntax", "expected name and rules"))?;
+    let Value::Symbol(name) = name_val else {
+        return Err(EvalError::malformed(
+            "define-syntax",
+            "name must be a symbol",
+        ));
+    };
+    let mut iter = ListIter::new(rest);
+    let rules_form = iter
+        .next()
+        .ok_or_else(|| EvalError::malformed("define-syntax", "expected a syntax-rules form"))??;
+    let rules = crate::macros::parse_syntax_rules(&rules_form)?;
+    env.define(name, Value::Macro(Rc::new(rules)));
+    Ok(Step::Return(Value::Unspecified))
+}
+
+/// `(let-syntax ((name (syntax-rules ...)) ...) body...)`. Binds the
+/// macros in a fresh child env and evaluates the body.
+/// `letrec-syntax` is treated the same — `syntax-rules` can't reference
+/// other macros being defined in the same form anyway.
+fn step_let_syntax(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let (bindings_form, body_tail) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("let-syntax", "expected bindings and body"))?;
+    let bindings = collect_list(&bindings_form)
+        .map_err(|()| EvalError::malformed("let-syntax", "bindings must be a proper list"))?;
+    let body = collect_list(&body_tail)
+        .map_err(|()| EvalError::malformed("let-syntax", "body must be a proper list"))?;
+    if body.is_empty() {
+        return Err(EvalError::malformed("let-syntax", "body must not be empty"));
+    }
+    let scope = Env::extend(env);
+    for b in bindings {
+        let parts = collect_list(&b)
+            .map_err(|()| EvalError::malformed("let-syntax", "each binding must be a list"))?;
+        if parts.len() != 2 {
+            return Err(EvalError::malformed(
+                "let-syntax",
+                "binding must be (name (syntax-rules ...))",
+            ));
+        }
+        let Value::Symbol(name) = parts[0].clone() else {
+            return Err(EvalError::malformed(
+                "let-syntax",
+                "binding name must be a symbol",
+            ));
+        };
+        let rules = crate::macros::parse_syntax_rules(&parts[1])?;
+        scope.define(name, Value::Macro(Rc::new(rules)));
+    }
+    Ok(eval_sequence(body, scope, frames))
 }
 
 // ---------------------------------------------------------------------
