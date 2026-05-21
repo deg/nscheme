@@ -9,6 +9,7 @@ pub mod env;
 pub mod eval;
 pub mod io;
 pub mod lex;
+pub mod library;
 pub mod macros;
 pub mod parse;
 pub mod value;

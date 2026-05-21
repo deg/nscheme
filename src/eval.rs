@@ -232,6 +232,9 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
             "quasiquote" => return step_quasiquote(&tail, env),
             "define-syntax" => return step_define_syntax(tail, env),
             "let-syntax" | "letrec-syntax" => return step_let_syntax(tail, env, frames),
+            "define-library" => return step_define_library(tail, env),
+            "import" => return step_import(tail, env),
+            "cond-expand" => return step_cond_expand(tail, env, frames),
             _ => { /* fall through to procedure call or macro */ }
         }
         // Macro application: if the head symbol resolves to a Macro
@@ -304,6 +307,217 @@ fn step_let_syntax(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<
         scope.define(name, Value::Macro(Rc::new(rules)));
     }
     Ok(eval_sequence(body, scope, frames))
+}
+
+/// `(define-library (name) decl...)`. Each `decl` is one of:
+/// `(export …)`, `(import …)`, `(begin …)`, `(include "file")`,
+/// `(cond-expand …)`.
+fn step_define_library(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
+    use std::collections::HashMap;
+    let (name_form, decls_tail) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("define-library", "expected name and decls"))?;
+    let lib_name = crate::library::parse_library_name(&name_form)?;
+    let decls = collect_list(&decls_tail)
+        .map_err(|()| EvalError::malformed("define-library", "decls must be a proper list"))?;
+    let lib_env = crate::env::Env::extend(env.clone());
+    let mut exports: Vec<Symbol> = Vec::new();
+    process_library_decls(&decls, &lib_env, &mut exports)?;
+    // Collect exported bindings into a registry entry.
+    let mut bindings: HashMap<Symbol, Value> = HashMap::new();
+    for name in exports {
+        let v = lib_env.lookup(&name).ok_or_else(|| {
+            EvalError::malformed("define-library", "exported name was not defined")
+        })?;
+        bindings.insert(name, v);
+    }
+    crate::library::register_library(lib_name, bindings);
+    Ok(Step::Return(Value::Unspecified))
+}
+
+fn process_library_decls(
+    decls: &[Value],
+    lib_env: &EnvRef,
+    exports: &mut Vec<Symbol>,
+) -> Result<(), EvalError> {
+    for decl in decls {
+        let parts = collect_list(decl)
+            .map_err(|()| EvalError::malformed("define-library", "decl must be a list"))?;
+        if parts.is_empty() {
+            continue;
+        }
+        let Value::Symbol(head) = &parts[0] else {
+            return Err(EvalError::malformed(
+                "define-library",
+                "decl must start with an identifier",
+            ));
+        };
+        match head.name() {
+            "export" => {
+                for e in &parts[1..] {
+                    if let Value::Symbol(s) = e {
+                        exports.push(s.clone());
+                    } else {
+                        return Err(EvalError::malformed("export", "expected identifier"));
+                    }
+                }
+            }
+            "import" => {
+                for lib_form in &parts[1..] {
+                    import_one(lib_form, lib_env)?;
+                }
+            }
+            "begin" => {
+                for body in &parts[1..] {
+                    eval(body.clone(), lib_env.clone())?;
+                }
+            }
+            "include" => {
+                for path_val in &parts[1..] {
+                    let Value::String(p) = path_val else {
+                        return Err(EvalError::malformed("include", "argument must be a string"));
+                    };
+                    let source = std::fs::read_to_string(&*p.borrow()).map_err(|e| {
+                        EvalError::malformed("include", format!("read {}: {e}", p.borrow()))
+                    })?;
+                    eval_source(&source, lib_env.clone())?;
+                }
+            }
+            "cond-expand" => {
+                let chosen = pick_cond_expand_branch(&parts[1..])?;
+                if let Some(branch_decls) = chosen {
+                    process_library_decls(&branch_decls, lib_env, exports)?;
+                }
+            }
+            other => {
+                return Err(EvalError::malformed(
+                    "define-library",
+                    format!("unknown library declaration: {other}"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn step_import(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
+    let libs = collect_list(&tail)
+        .map_err(|()| EvalError::malformed("import", "import list must be proper"))?;
+    for lib_form in libs {
+        import_one(&lib_form, &env)?;
+    }
+    Ok(Step::Return(Value::Unspecified))
+}
+
+fn import_one(lib_form: &Value, target: &EnvRef) -> Result<(), EvalError> {
+    let lib_name = crate::library::parse_library_name(lib_form)?;
+    if crate::library::is_builtin_library(&lib_name) {
+        // Bindings already installed by install_base.
+        return Ok(());
+    }
+    let bindings = crate::library::library_bindings(&lib_name).ok_or_else(|| {
+        EvalError::malformed(
+            "import",
+            format!("unknown library: ({})", lib_name.join(" ")),
+        )
+    })?;
+    for (name, value) in bindings {
+        target.define(name, value);
+    }
+    Ok(())
+}
+
+fn step_cond_expand(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let clauses = collect_list(&tail)
+        .map_err(|()| EvalError::malformed("cond-expand", "clause list must be proper"))?;
+    if let Some(body) = pick_cond_expand_branch(&clauses)? {
+        if body.is_empty() {
+            return Ok(Step::Return(Value::Unspecified));
+        }
+        return Ok(eval_sequence(body, env, frames));
+    }
+    Ok(Step::Return(Value::Unspecified))
+}
+
+/// Walk cond-expand clauses, return the first matching clause's body
+/// (as a `Vec<Value>`) or `None` if none match.
+fn pick_cond_expand_branch(clauses: &[Value]) -> Result<Option<Vec<Value>>, EvalError> {
+    for clause in clauses {
+        let parts = collect_list(clause)
+            .map_err(|()| EvalError::malformed("cond-expand", "each clause must be a list"))?;
+        if parts.is_empty() {
+            return Err(EvalError::malformed("cond-expand", "empty clause"));
+        }
+        if matches!(&parts[0], Value::Symbol(s) if s.name() == "else") {
+            return Ok(Some(parts.into_iter().skip(1).collect()));
+        }
+        if eval_feature_req(&parts[0])? {
+            return Ok(Some(parts.into_iter().skip(1).collect()));
+        }
+    }
+    Ok(None)
+}
+
+/// Evaluate a cond-expand feature requirement.
+/// Allowed forms: identifier, (library NAME), (and …), (or …), (not …).
+fn eval_feature_req(req: &Value) -> Result<bool, EvalError> {
+    match req {
+        Value::Symbol(s) => Ok(crate::library::features().contains(&s.name())),
+        Value::Pair(_) => {
+            let parts = collect_list(req).map_err(|()| {
+                EvalError::malformed("cond-expand", "feature must be a proper list")
+            })?;
+            let Value::Symbol(head) = &parts[0] else {
+                return Err(EvalError::malformed(
+                    "cond-expand",
+                    "feature head must be identifier",
+                ));
+            };
+            match head.name() {
+                "and" => {
+                    for p in &parts[1..] {
+                        if !eval_feature_req(p)? {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                }
+                "or" => {
+                    for p in &parts[1..] {
+                        if eval_feature_req(p)? {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                }
+                "not" => {
+                    if parts.len() != 2 {
+                        return Err(EvalError::malformed("cond-expand", "not takes one operand"));
+                    }
+                    Ok(!eval_feature_req(&parts[1])?)
+                }
+                "library" => {
+                    if parts.len() != 2 {
+                        return Err(EvalError::malformed(
+                            "cond-expand",
+                            "library takes one operand",
+                        ));
+                    }
+                    let name = crate::library::parse_library_name(&parts[1])?;
+                    Ok(crate::library::is_builtin_library(&name)
+                        || crate::library::library_exists(&name))
+                }
+                other => Err(EvalError::malformed(
+                    "cond-expand",
+                    format!("unknown feature head: {other}"),
+                )),
+            }
+        }
+        _ => Err(EvalError::malformed(
+            "cond-expand",
+            "feature must be an identifier or list",
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------

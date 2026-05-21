@@ -793,6 +793,13 @@ fn install_misc(env: &EnvRef) {
             got: other.type_name().into(),
         }),
     });
+    define(env, "features", Arity::Exact(0), |_| {
+        Ok(Value::list_from(
+            crate::library::features()
+                .into_iter()
+                .map(|s| Value::Symbol(Symbol::intern(s))),
+        ))
+    });
 }
 
 // ---------------------------------------------------------------------
