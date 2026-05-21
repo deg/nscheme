@@ -5,6 +5,7 @@
 //! interpreter can be embedded in other Rust applications.
 
 pub mod env;
+pub mod eval;
 pub mod lex;
 pub mod parse;
 pub mod value;

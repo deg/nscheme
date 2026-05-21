@@ -29,6 +29,8 @@ use std::rc::Rc;
 
 use thiserror::Error;
 
+use crate::env::EnvRef;
+
 // ---------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------
@@ -145,8 +147,8 @@ pub struct Pair {
 /// Signature of a Rust-implemented primitive.
 pub type PrimitiveFn = fn(&[Value]) -> Result<Value>;
 
-/// A procedure value. Only [`Self::Primitive`] is populated in T5; the
-/// evaluator bead (`nscheme-1no`) adds a `Closure` variant.
+/// A procedure value. Either implemented in Rust ([`Self::Primitive`])
+/// or constructed from a `lambda` form ([`Self::Closure`]).
 pub enum Procedure {
     Primitive {
         /// Display name (e.g. `"car"`, `"+"`).
@@ -156,12 +158,31 @@ pub enum Procedure {
         /// Rust implementation.
         body: PrimitiveFn,
     },
+    Closure {
+        /// Positional parameter names.
+        params: Vec<Symbol>,
+        /// `rest` parameter from `(lambda (a b . rest) ...)` or
+        /// `(lambda args ...)`; `None` for fixed-arity closures.
+        rest: Option<Symbol>,
+        /// Raw body datums. The evaluator re-walks the body each call;
+        /// no precompilation in v1.
+        body: Vec<Value>,
+        /// Defining environment, kept alive by `Rc`. Closures over the
+        /// same scope share this `Rc`, so mutations to enclosed
+        /// variables are visible across them (needed for `letrec` /
+        /// mutual recursion).
+        env: EnvRef,
+        /// Optional name attached at `(define (f …) …)` for nicer
+        /// `#<procedure foo>` rendering and error messages.
+        name: Option<String>,
+    },
 }
 
 impl Procedure {
     pub fn name(&self) -> &str {
         match self {
             Self::Primitive { name, .. } => name,
+            Self::Closure { name, .. } => name.as_deref().unwrap_or("anonymous"),
         }
     }
 }
@@ -174,6 +195,14 @@ impl fmt::Debug for Procedure {
                 .field("name", name)
                 .field("arity", arity)
                 .finish(),
+            Self::Closure {
+                params, rest, name, ..
+            } => f
+                .debug_struct("Closure")
+                .field("name", name)
+                .field("params", params)
+                .field("rest", rest)
+                .finish_non_exhaustive(),
         }
     }
 }
