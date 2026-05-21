@@ -244,15 +244,56 @@ impl fmt::Display for Arity {
 }
 
 // ---------------------------------------------------------------------
-// Port (stub — filled in by T14 nscheme-wcy)
+// Port
 // ---------------------------------------------------------------------
 
-/// I/O port. Only a stub in T5; the I/O bead (`nscheme-wcy`) fleshes out
-/// the variants and operations.
+/// I/O port. Each variant captures the kind of underlying source/sink
+/// plus enough mutable state to track read position or write buffer.
+///
+/// Binary ports are deferred — every variant here is a textual port.
+/// Output ports write through `print!` rather than buffering; that
+/// keeps interactive use snappy at the cost of a flush per write.
 #[derive(Debug)]
 pub enum Port {
-    /// Marker for a port that has yet to be implemented in T14.
-    Placeholder,
+    /// Reads from process stdin one line at a time.
+    StdIn { buffer: String, pos: usize },
+    /// Writes to process stdout.
+    StdOut,
+    /// Writes to process stderr.
+    StdErr,
+    /// Reads from an in-memory string. `pos` tracks the next byte index
+    /// to consume; we use byte-indexed slicing rather than char indexing
+    /// because Rust strings already store UTF-8.
+    StringInput { content: String, pos: usize },
+    /// Accumulates writes into a buffer; `get-output-string` returns it.
+    StringOutput { buffer: String },
+    /// Reads the entire file into memory at open time. Big-file
+    /// streaming would need a separate variant.
+    FileInput {
+        content: String,
+        pos: usize,
+        path: String,
+    },
+    /// Appends to a file. The buffer is flushed on close.
+    FileOutput { buffer: String, path: String },
+    /// A port that has been explicitly closed.
+    Closed,
+}
+
+impl Port {
+    pub fn is_input(&self) -> bool {
+        matches!(
+            self,
+            Self::StdIn { .. } | Self::StringInput { .. } | Self::FileInput { .. }
+        )
+    }
+
+    pub fn is_output(&self) -> bool {
+        matches!(
+            self,
+            Self::StdOut | Self::StdErr | Self::StringOutput { .. } | Self::FileOutput { .. }
+        )
+    }
 }
 
 // ---------------------------------------------------------------------

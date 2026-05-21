@@ -56,7 +56,9 @@ pub fn install_base(env: &EnvRef) -> Result<(), EvalError> {
     install_symbols(env);
     install_vectors(env);
     install_bytevectors(env);
+    crate::io::install_io(env);
     eval_source(BOOTSTRAP, env.clone())?;
+    eval_source(crate::io::CURRENT_PORTS_BOOTSTRAP, env.clone())?;
     Ok(())
 }
 

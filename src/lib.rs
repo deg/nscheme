@@ -7,6 +7,7 @@
 pub mod builtins;
 pub mod env;
 pub mod eval;
+pub mod io;
 pub mod lex;
 pub mod parse;
 pub mod value;
