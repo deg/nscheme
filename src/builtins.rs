@@ -51,6 +51,11 @@ pub fn install_base(env: &EnvRef) -> Result<(), EvalError> {
     install_equality(env);
     install_list_ops(env);
     install_misc(env);
+    install_chars(env);
+    install_strings(env);
+    install_symbols(env);
+    install_vectors(env);
+    install_bytevectors(env);
     eval_source(BOOTSTRAP, env.clone())?;
     Ok(())
 }
@@ -785,6 +790,524 @@ fn install_misc(env: &EnvRef) {
             expected: "rational".into(),
             got: other.type_name().into(),
         }),
+    });
+}
+
+// ---------------------------------------------------------------------
+// Characters
+// ---------------------------------------------------------------------
+
+fn install_chars(env: &EnvRef) {
+    define(env, "char->integer", Arity::Exact(1), |a| match &a[0] {
+        Value::Char(c) =>
+        {
+            #[allow(clippy::cast_lossless)]
+            Ok(Value::Int(u32::from(*c) as i64))
+        }
+        other => Err(RuntimeError::Type {
+            expected: "char".into(),
+            got: other.type_name().into(),
+        }),
+    });
+    define(env, "integer->char", Arity::Exact(1), |a| {
+        let n = value_to_bigint(&a[0])?;
+        let code = n.to_u32().ok_or_else(|| {
+            RuntimeError::Other("integer->char: value out of Unicode range".into())
+        })?;
+        char::from_u32(code).map(Value::Char).ok_or_else(|| {
+            RuntimeError::Other(format!(
+                "integer->char: {code} is not a valid Unicode scalar"
+            ))
+        })
+    });
+    define(env, "char-alphabetic?", Arity::Exact(1), |a| {
+        char_predicate(&a[0], char::is_alphabetic)
+    });
+    define(env, "char-numeric?", Arity::Exact(1), |a| {
+        char_predicate(&a[0], char::is_numeric)
+    });
+    define(env, "char-whitespace?", Arity::Exact(1), |a| {
+        char_predicate(&a[0], char::is_whitespace)
+    });
+    define(env, "char-upper-case?", Arity::Exact(1), |a| {
+        char_predicate(&a[0], char::is_uppercase)
+    });
+    define(env, "char-lower-case?", Arity::Exact(1), |a| {
+        char_predicate(&a[0], char::is_lowercase)
+    });
+    define(env, "char-upcase", Arity::Exact(1), |a| match &a[0] {
+        Value::Char(c) => {
+            // char::to_uppercase yields an iterator; R7RS char-upcase
+            // returns one char, so take the first.
+            Ok(Value::Char(c.to_uppercase().next().unwrap_or(*c)))
+        }
+        other => Err(type_err("char", other)),
+    });
+    define(env, "char-downcase", Arity::Exact(1), |a| match &a[0] {
+        Value::Char(c) => Ok(Value::Char(c.to_lowercase().next().unwrap_or(*c))),
+        other => Err(type_err("char", other)),
+    });
+    // Comparison ops.
+    define(env, "char=?", Arity::AtLeast(2), |a| {
+        char_chain(a, |x, y| x == y)
+    });
+    define(env, "char<?", Arity::AtLeast(2), |a| {
+        char_chain(a, |x, y| x < y)
+    });
+    define(env, "char>?", Arity::AtLeast(2), |a| {
+        char_chain(a, |x, y| x > y)
+    });
+    define(env, "char<=?", Arity::AtLeast(2), |a| {
+        char_chain(a, |x, y| x <= y)
+    });
+    define(env, "char>=?", Arity::AtLeast(2), |a| {
+        char_chain(a, |x, y| x >= y)
+    });
+}
+
+fn char_predicate(v: &Value, f: fn(char) -> bool) -> Result<Value, RuntimeError> {
+    match v {
+        Value::Char(c) => Ok(Value::Bool(f(*c))),
+        other => Err(type_err("char", other)),
+    }
+}
+
+fn char_chain(args: &[Value], pass: fn(char, char) -> bool) -> Result<Value, RuntimeError> {
+    let mut prev = match &args[0] {
+        Value::Char(c) => *c,
+        other => return Err(type_err("char", other)),
+    };
+    for a in &args[1..] {
+        let cur = match a {
+            Value::Char(c) => *c,
+            other => return Err(type_err("char", other)),
+        };
+        if !pass(prev, cur) {
+            return Ok(Value::Bool(false));
+        }
+        prev = cur;
+    }
+    Ok(Value::Bool(true))
+}
+
+fn type_err(expected: &str, got: &Value) -> RuntimeError {
+    RuntimeError::Type {
+        expected: expected.into(),
+        got: got.type_name().into(),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Strings
+// ---------------------------------------------------------------------
+
+fn install_strings(env: &EnvRef) {
+    define(env, "make-string", Arity::Range { min: 1, max: 2 }, |a| {
+        let len = value_to_usize(&a[0], "make-string")?;
+        let fill = if a.len() == 2 {
+            match &a[1] {
+                Value::Char(c) => *c,
+                other => return Err(type_err("char", other)),
+            }
+        } else {
+            ' '
+        };
+        Ok(Value::string(fill.to_string().repeat(len)))
+    });
+    define(env, "string", Arity::AtLeast(0), |args| {
+        let mut s = String::with_capacity(args.len());
+        for a in args {
+            match a {
+                Value::Char(c) => s.push(*c),
+                other => return Err(type_err("char", other)),
+            }
+        }
+        Ok(Value::string(s))
+    });
+    define(env, "string-length", Arity::Exact(1), |a| match &a[0] {
+        Value::String(s) =>
+        {
+            #[allow(clippy::cast_possible_wrap)]
+            Ok(Value::Int(s.borrow().chars().count() as i64))
+        }
+        other => Err(type_err("string", other)),
+    });
+    define(env, "string-ref", Arity::Exact(2), |a| match &a[0] {
+        Value::String(s) => {
+            let idx = value_to_usize(&a[1], "string-ref")?;
+            s.borrow()
+                .chars()
+                .nth(idx)
+                .map(Value::Char)
+                .ok_or_else(|| RuntimeError::Other("string-ref: index out of range".into()))
+        }
+        other => Err(type_err("string", other)),
+    });
+    define(
+        env,
+        "substring",
+        Arity::Range { min: 2, max: 3 },
+        |a| match &a[0] {
+            Value::String(s) => {
+                let start = value_to_usize(&a[1], "substring")?;
+                let total = s.borrow().chars().count();
+                let end = if a.len() == 3 {
+                    value_to_usize(&a[2], "substring")?
+                } else {
+                    total
+                };
+                if start > end || end > total {
+                    return Err(RuntimeError::Other(
+                        "substring: indices out of range".into(),
+                    ));
+                }
+                let sub: String = s.borrow().chars().skip(start).take(end - start).collect();
+                Ok(Value::string(sub))
+            }
+            other => Err(type_err("string", other)),
+        },
+    );
+    define(env, "string-append", Arity::AtLeast(0), |args| {
+        let mut out = String::new();
+        for a in args {
+            match a {
+                Value::String(s) => out.push_str(&s.borrow()),
+                other => return Err(type_err("string", other)),
+            }
+        }
+        Ok(Value::string(out))
+    });
+    define(env, "string->list", Arity::Exact(1), |a| match &a[0] {
+        Value::String(s) => {
+            let items: Vec<Value> = s.borrow().chars().map(Value::Char).collect();
+            Ok(Value::list_from(items))
+        }
+        other => Err(type_err("string", other)),
+    });
+    define(env, "list->string", Arity::Exact(1), |a| {
+        let mut out = String::new();
+        let mut cur = a[0].clone();
+        loop {
+            match cur {
+                Value::Null => break,
+                Value::Pair(p) => {
+                    let pair = p.borrow();
+                    match &pair.car {
+                        Value::Char(c) => out.push(*c),
+                        other => return Err(type_err("char", other)),
+                    }
+                    cur = pair.cdr.clone();
+                }
+                _ => return Err(type_err("proper list of chars", &a[0])),
+            }
+        }
+        Ok(Value::string(out))
+    });
+    define(env, "string-copy", Arity::AtLeast(1), |a| match &a[0] {
+        Value::String(s) => Ok(Value::string(s.borrow().clone())),
+        other => Err(type_err("string", other)),
+    });
+    // Comparison ops.
+    define(env, "string=?", Arity::AtLeast(2), |a| {
+        string_chain(a, |x, y| x == y)
+    });
+    define(env, "string<?", Arity::AtLeast(2), |a| {
+        string_chain(a, |x, y| x < y)
+    });
+    define(env, "string>?", Arity::AtLeast(2), |a| {
+        string_chain(a, |x, y| x > y)
+    });
+    define(env, "string<=?", Arity::AtLeast(2), |a| {
+        string_chain(a, |x, y| x <= y)
+    });
+    define(env, "string>=?", Arity::AtLeast(2), |a| {
+        string_chain(a, |x, y| x >= y)
+    });
+    define(
+        env,
+        "string->number",
+        Arity::Range { min: 1, max: 2 },
+        |a| {
+            let Value::String(s) = &a[0] else {
+                return Err(type_err("string", &a[0]));
+            };
+            let s = s.borrow().clone();
+            // Optional radix (2, 8, 10, 16). Default 10.
+            let _radix = if a.len() == 2 {
+                value_to_usize(&a[1], "string->number")?
+            } else {
+                10
+            };
+            // Quick parse via the existing parser (handles all numeric
+            // forms). If the parse fails OR parses to a non-number,
+            // R7RS says return #f.
+            match crate::parse::parse_one(&s) {
+                Ok(v) if v.is_number() => Ok(v),
+                _ => Ok(Value::Bool(false)),
+            }
+        },
+    );
+    define(
+        env,
+        "number->string",
+        Arity::Range { min: 1, max: 2 },
+        |a| {
+            // We render via Display for radix=10; other radices not yet
+            // supported beyond integers.
+            match &a[0] {
+                Value::Int(_) | Value::BigInt(_) | Value::Rational(_) | Value::Float(_) => {
+                    Ok(Value::string(format!("{}", a[0])))
+                }
+                other => Err(type_err("number", other)),
+            }
+        },
+    );
+}
+
+fn string_chain(args: &[Value], pass: fn(&str, &str) -> bool) -> Result<Value, RuntimeError> {
+    let mut prev = match &args[0] {
+        Value::String(s) => s.borrow().clone(),
+        other => return Err(type_err("string", other)),
+    };
+    for a in &args[1..] {
+        let cur = match a {
+            Value::String(s) => s.borrow().clone(),
+            other => return Err(type_err("string", other)),
+        };
+        if !pass(&prev, &cur) {
+            return Ok(Value::Bool(false));
+        }
+        prev = cur;
+    }
+    Ok(Value::Bool(true))
+}
+
+fn value_to_usize(v: &Value, ctx: &'static str) -> Result<usize, RuntimeError> {
+    let big = value_to_bigint(v)?;
+    big.to_usize()
+        .ok_or_else(|| RuntimeError::Other(format!("{ctx}: integer out of usize range")))
+}
+
+// ---------------------------------------------------------------------
+// Symbols
+// ---------------------------------------------------------------------
+
+fn install_symbols(env: &EnvRef) {
+    define(env, "symbol->string", Arity::Exact(1), |a| match &a[0] {
+        Value::Symbol(s) => Ok(Value::string(s.name())),
+        other => Err(type_err("symbol", other)),
+    });
+    define(env, "string->symbol", Arity::Exact(1), |a| match &a[0] {
+        Value::String(s) => Ok(Value::Symbol(Symbol::intern(&s.borrow()))),
+        other => Err(type_err("string", other)),
+    });
+    define(env, "symbol=?", Arity::AtLeast(2), |args| {
+        let first = match &args[0] {
+            Value::Symbol(s) => s.clone(),
+            other => return Err(type_err("symbol", other)),
+        };
+        for a in &args[1..] {
+            match a {
+                Value::Symbol(s) if s == &first => {}
+                Value::Symbol(_) => return Ok(Value::Bool(false)),
+                other => return Err(type_err("symbol", other)),
+            }
+        }
+        Ok(Value::Bool(true))
+    });
+}
+
+// ---------------------------------------------------------------------
+// Vectors
+// ---------------------------------------------------------------------
+
+fn install_vectors(env: &EnvRef) {
+    define(env, "vector", Arity::AtLeast(0), |args| {
+        Ok(Value::vector(args.to_vec()))
+    });
+    define(env, "make-vector", Arity::Range { min: 1, max: 2 }, |a| {
+        let len = value_to_usize(&a[0], "make-vector")?;
+        let fill = if a.len() == 2 {
+            a[1].clone()
+        } else {
+            Value::Unspecified
+        };
+        Ok(Value::vector(vec![fill; len]))
+    });
+    define(env, "vector-length", Arity::Exact(1), |a| match &a[0] {
+        Value::Vector(v) =>
+        {
+            #[allow(clippy::cast_possible_wrap)]
+            Ok(Value::Int(v.borrow().len() as i64))
+        }
+        other => Err(type_err("vector", other)),
+    });
+    define(env, "vector-ref", Arity::Exact(2), |a| match &a[0] {
+        Value::Vector(v) => {
+            let idx = value_to_usize(&a[1], "vector-ref")?;
+            v.borrow()
+                .get(idx)
+                .cloned()
+                .ok_or_else(|| RuntimeError::Other("vector-ref: index out of range".into()))
+        }
+        other => Err(type_err("vector", other)),
+    });
+    define(env, "vector-set!", Arity::Exact(3), |a| match &a[0] {
+        Value::Vector(v) => {
+            let idx = value_to_usize(&a[1], "vector-set!")?;
+            let mut vec_ref = v.borrow_mut();
+            if idx >= vec_ref.len() {
+                return Err(RuntimeError::Other(
+                    "vector-set!: index out of range".into(),
+                ));
+            }
+            vec_ref[idx] = a[2].clone();
+            Ok(Value::Unspecified)
+        }
+        other => Err(type_err("vector", other)),
+    });
+    define(env, "vector->list", Arity::Exact(1), |a| match &a[0] {
+        Value::Vector(v) => Ok(Value::list_from(v.borrow().iter().cloned())),
+        other => Err(type_err("vector", other)),
+    });
+    define(env, "list->vector", Arity::Exact(1), |a| {
+        let mut items: Vec<Value> = Vec::new();
+        let mut cur = a[0].clone();
+        loop {
+            match cur {
+                Value::Null => break,
+                Value::Pair(p) => {
+                    let pair = p.borrow();
+                    items.push(pair.car.clone());
+                    cur = pair.cdr.clone();
+                }
+                _ => return Err(type_err("proper list", &a[0])),
+            }
+        }
+        Ok(Value::vector(items))
+    });
+    define(env, "vector-fill!", Arity::Exact(2), |a| match &a[0] {
+        Value::Vector(v) => {
+            let mut vec_ref = v.borrow_mut();
+            for slot in vec_ref.iter_mut() {
+                *slot = a[1].clone();
+            }
+            Ok(Value::Unspecified)
+        }
+        other => Err(type_err("vector", other)),
+    });
+    define(env, "vector-copy", Arity::AtLeast(1), |a| match &a[0] {
+        Value::Vector(v) => Ok(Value::vector(v.borrow().clone())),
+        other => Err(type_err("vector", other)),
+    });
+}
+
+// ---------------------------------------------------------------------
+// Bytevectors
+// ---------------------------------------------------------------------
+
+fn install_bytevectors(env: &EnvRef) {
+    define(env, "bytevector", Arity::AtLeast(0), |args| {
+        let mut bytes = Vec::with_capacity(args.len());
+        for a in args {
+            match a {
+                Value::Int(n) if (0..=255).contains(n) => {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    bytes.push(*n as u8);
+                }
+                _ => {
+                    return Err(RuntimeError::Other(
+                        "bytevector element must be integer in 0..=255".into(),
+                    ));
+                }
+            }
+        }
+        Ok(Value::bytevector(bytes))
+    });
+    define(
+        env,
+        "make-bytevector",
+        Arity::Range { min: 1, max: 2 },
+        |a| {
+            let len = value_to_usize(&a[0], "make-bytevector")?;
+            let fill = if a.len() == 2 {
+                match &a[1] {
+                    Value::Int(n) if (0..=255).contains(n) => {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        {
+                            *n as u8
+                        }
+                    }
+                    _ => {
+                        return Err(RuntimeError::Other(
+                            "make-bytevector fill must be integer in 0..=255".into(),
+                        ));
+                    }
+                }
+            } else {
+                0
+            };
+            Ok(Value::bytevector(vec![fill; len]))
+        },
+    );
+    define(env, "bytevector-length", Arity::Exact(1), |a| match &a[0] {
+        Value::Bytevector(b) =>
+        {
+            #[allow(clippy::cast_possible_wrap)]
+            Ok(Value::Int(b.borrow().len() as i64))
+        }
+        other => Err(type_err("bytevector", other)),
+    });
+    define(env, "bytevector-u8-ref", Arity::Exact(2), |a| match &a[0] {
+        Value::Bytevector(b) => {
+            let idx = value_to_usize(&a[1], "bytevector-u8-ref")?;
+            b.borrow()
+                .get(idx)
+                .map(|n| Value::Int(i64::from(*n)))
+                .ok_or_else(|| RuntimeError::Other("bytevector-u8-ref: index out of range".into()))
+        }
+        other => Err(type_err("bytevector", other)),
+    });
+    define(env, "bytevector-u8-set!", Arity::Exact(3), |a| {
+        match &a[0] {
+            Value::Bytevector(b) => {
+                let idx = value_to_usize(&a[1], "bytevector-u8-set!")?;
+                let Value::Int(n) = a[2] else {
+                    return Err(RuntimeError::Other(
+                        "bytevector-u8-set!: value must be integer in 0..=255".into(),
+                    ));
+                };
+                if !(0..=255).contains(&n) {
+                    return Err(RuntimeError::Other(
+                        "bytevector-u8-set!: value out of range".into(),
+                    ));
+                }
+                let mut bs = b.borrow_mut();
+                if idx >= bs.len() {
+                    return Err(RuntimeError::Other(
+                        "bytevector-u8-set!: index out of range".into(),
+                    ));
+                }
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                {
+                    bs[idx] = n as u8;
+                }
+                Ok(Value::Unspecified)
+            }
+            other => Err(type_err("bytevector", other)),
+        }
+    });
+    define(env, "utf8->string", Arity::AtLeast(1), |a| match &a[0] {
+        Value::Bytevector(b) => {
+            let s = String::from_utf8(b.borrow().clone())
+                .map_err(|e| RuntimeError::Other(format!("utf8->string: {e}")))?;
+            Ok(Value::string(s))
+        }
+        other => Err(type_err("bytevector", other)),
+    });
+    define(env, "string->utf8", Arity::AtLeast(1), |a| match &a[0] {
+        Value::String(s) => Ok(Value::bytevector(s.borrow().as_bytes().to_vec())),
+        other => Err(type_err("string", other)),
     });
 }
 
