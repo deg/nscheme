@@ -18,6 +18,12 @@ use std::collections::VecDeque;
 
 use thiserror::Error;
 
+use std::rc::Rc;
+
+use num_bigint::BigInt;
+use num_rational::BigRational;
+use num_traits::{FromPrimitive, Num as NumTrait, One, ToPrimitive, Zero};
+
 use crate::lex::{Exactness, NumberLexeme, Span, Token, TokenKind, tokenize};
 use crate::value::{Symbol, Value};
 
@@ -249,11 +255,9 @@ fn build_list(items: Vec<Value>, tail: Value) -> Value {
 
 /// Convert a [`NumberLexeme`] into a runtime [`Value`].
 ///
-/// This is the v1 subset: fixnums (`i64`) and inexact reals (`f64`).
-/// Anything outside that range (overflow, rationals, complex) returns
-/// an [`ParseError::InvalidNumber`] so the user gets a useful diagnostic
-/// rather than a silent miscalculation; the numeric tower bead
-/// (`nscheme-c92`) will broaden this.
+/// Supports the full R7RS exact tower (fixnum / bignum / rational) plus
+/// inexact reals. Complex numbers (`a+bi`, `a@b`) are recognized but
+/// remain unimplemented and return an [`ParseError::InvalidNumber`].
 fn parse_number(num: &NumberLexeme, span: Span) -> Result<Value, ParseError> {
     let body = &num.body;
     let radix = num.radix;
@@ -272,56 +276,94 @@ fn parse_number(num: &NumberLexeme, span: Span) -> Result<Value, ParseError> {
         }
     }
 
-    // Reject things we can't handle yet so the user gets a real error
-    // instead of garbage. The numeric-tower bead will accept these.
-    let looks_rational = body.contains('/');
-    let looks_complex = body.contains('i') || body.contains('@');
-    if looks_rational || looks_complex {
+    // Complex numbers — recognized lexically but not yet evaluated.
+    if body.contains('i') || body.contains('@') {
         return Err(bad());
+    }
+
+    // Exact rational: a/b.
+    if let Some(slash) = body.find('/') {
+        let (num_str, denom_str_with_slash) = body.split_at(slash);
+        let denom_str = &denom_str_with_slash[1..];
+        let numer = <BigInt as NumTrait>::from_str_radix(num_str, radix).map_err(|_| bad())?;
+        let denom = <BigInt as NumTrait>::from_str_radix(denom_str, radix).map_err(|_| bad())?;
+        if denom.is_zero() {
+            return Err(bad());
+        }
+        let r = BigRational::new(numer, denom);
+        // Promote to inexact if #i.
+        if matches!(num.exactness, Exactness::Inexact) {
+            return Ok(Value::Float(rational_to_f64(&r)));
+        }
+        return Ok(normalize_rational(r));
     }
 
     let looks_inexact =
         radix == 10 && (body.contains('.') || body.contains('e') || body.contains('E'));
 
-    if looks_inexact || matches!(num.exactness, Exactness::Inexact) {
-        // Parse as f64. For radix-10 with #i prefix we go through f64
-        // directly. Non-10 radix with #i is rare and unsupported here.
-        if radix != 10 {
-            return Err(bad());
-        }
+    if looks_inexact {
+        // f64 parse handles `.5`, `1e10`, `-2.5e-3`, etc.
         let f: f64 = body.parse().map_err(|_| bad())?;
+        // #e prefix on a decimal: convert to exact rational.
+        if matches!(num.exactness, Exactness::Exact) {
+            return Ok(Value::Rational(Rc::new(float_to_rational_or_error(
+                f, bad,
+            )?)));
+        }
         return Ok(Value::Float(f));
     }
 
-    // Exact integer path. Parse with the requested radix.
-    let (sign, digits) = strip_sign(body);
-    let magnitude: i64 = i64::from_str_radix(digits, radix).map_err(|_| bad())?;
-    let signed = if sign == Sign::Negative {
-        magnitude.checked_neg().ok_or_else(bad)?
-    } else {
-        magnitude
-    };
-    if matches!(num.exactness, Exactness::Exact) {
-        // Explicitly #e — keep as integer (already exact).
-        return Ok(Value::Int(signed));
+    // Exact integer path. Try i64 fast path; on overflow, BigInt.
+    if let Ok(n) = i64::from_str_radix(body, radix) {
+        if matches!(num.exactness, Exactness::Inexact) {
+            #[allow(clippy::cast_precision_loss)]
+            return Ok(Value::Float(n as f64));
+        }
+        return Ok(Value::Int(n));
     }
-    Ok(Value::Int(signed))
+    let big = <BigInt as NumTrait>::from_str_radix(body, radix).map_err(|_| bad())?;
+    if matches!(num.exactness, Exactness::Inexact) {
+        return Ok(Value::Float(bigint_to_f64(&big)));
+    }
+    Ok(promote_bigint(big))
 }
 
-#[derive(Eq, PartialEq)]
-enum Sign {
-    Positive,
-    Negative,
+/// Normalize: rationals with denominator 1 collapse to integers.
+fn normalize_rational(r: BigRational) -> Value {
+    if One::is_one(r.denom()) {
+        promote_bigint(r.numer().clone())
+    } else {
+        Value::Rational(Rc::new(r))
+    }
 }
 
-fn strip_sign(body: &str) -> (Sign, &str) {
-    if let Some(rest) = body.strip_prefix('-') {
-        (Sign::Negative, rest)
-    } else if let Some(rest) = body.strip_prefix('+') {
-        (Sign::Positive, rest)
+/// Collapse a `BigInt` into a fixnum if it fits in `i64`.
+fn promote_bigint(b: BigInt) -> Value {
+    if let Some(n) = b.to_i64() {
+        Value::Int(n)
     } else {
-        (Sign::Positive, body)
+        Value::BigInt(Rc::new(b))
     }
+}
+
+fn rational_to_f64(r: &BigRational) -> f64 {
+    r.to_f64().unwrap_or(f64::NAN)
+}
+
+fn bigint_to_f64(b: &BigInt) -> f64 {
+    b.to_f64().unwrap_or(f64::NAN)
+}
+
+/// Convert an `f64` to an exact rational, or error if non-finite. Used
+/// when the user explicitly wrote `#e<decimal>`.
+fn float_to_rational_or_error(
+    f: f64,
+    err: impl Fn() -> ParseError,
+) -> Result<BigRational, ParseError> {
+    if !f.is_finite() {
+        return Err(err());
+    }
+    BigRational::from_f64(f).ok_or_else(err)
 }
 
 fn format_lexeme(num: &NumberLexeme) -> String {
@@ -396,20 +438,29 @@ mod tests {
     }
 
     #[test]
-    fn rational_not_yet_supported() {
-        assert!(matches!(
-            parse_one("3/4"),
-            Err(ParseError::InvalidNumber { .. })
-        ));
+    fn rational_parsed_as_exact_rational() {
+        match parse_one("3/4").unwrap() {
+            Value::Rational(r) => {
+                assert_eq!(r.numer().to_string(), "3");
+                assert_eq!(r.denom().to_string(), "4");
+            }
+            other => panic!("expected Rational, got {other:?}"),
+        }
     }
 
     #[test]
-    fn integer_overflow_rejected() {
-        // 2^63 doesn't fit in i64.
-        assert!(matches!(
-            parse_one("9223372036854775808"),
-            Err(ParseError::InvalidNumber { .. }),
-        ));
+    fn integer_overflow_promotes_to_bigint() {
+        // 2^63 doesn't fit in i64 — must become a BigInt.
+        match parse_one("9223372036854775808").unwrap() {
+            Value::BigInt(b) => assert_eq!(b.to_string(), "9223372036854775808"),
+            other => panic!("expected BigInt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rational_reduces_when_integral() {
+        // 6/3 reduces to 2 (an Int, not a Rational with denom 1).
+        assert!(equal(&parse("6/3"), &Value::Int(2)));
     }
 
     #[test]

@@ -180,6 +180,8 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
         Value::Bool(_)
         | Value::Char(_)
         | Value::Int(_)
+        | Value::BigInt(_)
+        | Value::Rational(_)
         | Value::Float(_)
         | Value::String(_)
         | Value::Vector(_)

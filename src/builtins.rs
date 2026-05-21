@@ -19,8 +19,20 @@
 // registration table for a category of primitives. Splitting them
 // further would just multiply boilerplate.
 #![allow(clippy::too_many_lines)]
+// Mathematical formulas read more naturally with x/y as variable
+// names; `many_single_char_names` is noisy for the Num arithmetic.
+#![allow(clippy::many_single_char_names)]
+// num_add/sub/mul/div consume their operands; clippy's
+// `needless_pass_by_value` would flip the signatures to references and
+// force the call sites to clone instead of move. Numbers can carry
+// BigInts so moving is meaningfully cheaper.
+#![allow(clippy::needless_pass_by_value)]
 
 use std::rc::Rc;
+
+use num_bigint::BigInt;
+use num_rational::BigRational;
+use num_traits::{FromPrimitive, One, Signed, ToPrimitive, Zero};
 
 use crate::env::EnvRef;
 use crate::eval::{EvalError, eval_source};
@@ -52,11 +64,14 @@ fn define(env: &EnvRef, name: &'static str, arity: Arity, body: PrimitiveFn) {
 // Numeric helper
 // ---------------------------------------------------------------------
 
-/// Helper representation for numeric ops: either a fixnum or a float.
-/// Promotion follows R7RS: mixing exact and inexact produces inexact.
-#[derive(Clone, Copy, Debug)]
+/// Helper representation for numeric ops. R7RS exact/inexact rules:
+/// mixing exact and inexact produces inexact; otherwise stay in the
+/// exact tower.
+#[derive(Clone, Debug)]
 enum Num {
     Int(i64),
+    Big(BigInt),
+    Rat(BigRational),
     Float(f64),
 }
 
@@ -64,6 +79,8 @@ impl Num {
     fn from_value(v: &Value) -> Result<Self, RuntimeError> {
         match v {
             Value::Int(n) => Ok(Self::Int(*n)),
+            Value::BigInt(b) => Ok(Self::Big((**b).clone())),
+            Value::Rational(r) => Ok(Self::Rat((**r).clone())),
             Value::Float(f) => Ok(Self::Float(*f)),
             other => Err(RuntimeError::Type {
                 expected: "number".into(),
@@ -75,89 +92,169 @@ impl Num {
     fn into_value(self) -> Value {
         match self {
             Self::Int(n) => Value::Int(n),
+            Self::Big(b) => bigint_to_value(b),
+            Self::Rat(r) => rational_to_value(r),
             Self::Float(f) => Value::Float(f),
         }
     }
 
-    fn to_f64(self) -> f64 {
+    fn to_f64(&self) -> f64 {
         match self {
             #[allow(clippy::cast_precision_loss)]
-            Self::Int(n) => n as f64,
-            Self::Float(f) => f,
+            Self::Int(n) => *n as f64,
+            Self::Big(b) => b.to_f64().unwrap_or(f64::NAN),
+            Self::Rat(r) => r.to_f64().unwrap_or(f64::NAN),
+            Self::Float(f) => *f,
         }
     }
 
-    /// Promote two numbers to a common shape. Returns `(Int, Int)` only
-    /// if both are exact.
-    fn promote(a: Self, b: Self) -> (Self, Self) {
-        match (a, b) {
-            (Self::Int(_), Self::Int(_)) => (a, b),
-            _ => (Self::Float(a.to_f64()), Self::Float(b.to_f64())),
+    fn is_inexact(&self) -> bool {
+        matches!(self, Self::Float(_))
+    }
+
+    /// Promote an exact number to a common exact level.
+    fn to_rational(&self) -> BigRational {
+        match self {
+            Self::Int(n) => BigRational::from_i64(*n).expect("i64 to BigRational"),
+            Self::Big(b) => BigRational::from_integer(b.clone()),
+            Self::Rat(r) => r.clone(),
+            Self::Float(_) => unreachable!("to_rational on inexact"),
         }
     }
+}
 
-    fn add(a: Self, b: Self) -> Result<Self, RuntimeError> {
-        Ok(match Self::promote(a, b) {
-            (Self::Int(x), Self::Int(y)) => {
-                Self::Int(x.checked_add(y).ok_or(RuntimeError::Overflow { op: "+" })?)
-            }
-            (Self::Float(x), Self::Float(y)) => Self::Float(x + y),
-            _ => unreachable!(),
-        })
+/// Collapse a `BigInt` back to `Int` if it fits.
+fn bigint_to_value(b: BigInt) -> Value {
+    if let Some(n) = b.to_i64() {
+        Value::Int(n)
+    } else {
+        Value::BigInt(Rc::new(b))
     }
+}
 
-    fn sub(a: Self, b: Self) -> Result<Self, RuntimeError> {
-        Ok(match Self::promote(a, b) {
-            (Self::Int(x), Self::Int(y)) => {
-                Self::Int(x.checked_sub(y).ok_or(RuntimeError::Overflow { op: "-" })?)
-            }
-            (Self::Float(x), Self::Float(y)) => Self::Float(x - y),
-            _ => unreachable!(),
-        })
+/// Collapse a `BigRational` with denom 1 down through bigint to fixnum
+/// if possible.
+fn rational_to_value(r: BigRational) -> Value {
+    if One::is_one(r.denom()) {
+        bigint_to_value(r.numer().clone())
+    } else {
+        Value::Rational(Rc::new(r))
     }
+}
 
-    fn mul(a: Self, b: Self) -> Result<Self, RuntimeError> {
-        Ok(match Self::promote(a, b) {
-            (Self::Int(x), Self::Int(y)) => {
-                Self::Int(x.checked_mul(y).ok_or(RuntimeError::Overflow { op: "*" })?)
-            }
-            (Self::Float(x), Self::Float(y)) => Self::Float(x * y),
-            _ => unreachable!(),
-        })
+// Arithmetic combinators on Num that follow R7RS promotion.
+
+fn num_add(a: Num, b: Num) -> Num {
+    if a.is_inexact() || b.is_inexact() {
+        return Num::Float(a.to_f64() + b.to_f64());
     }
+    match (a, b) {
+        (Num::Int(x), Num::Int(y)) => match x.checked_add(y) {
+            Some(n) => Num::Int(n),
+            None => Num::Big(BigInt::from(x) + BigInt::from(y)),
+        },
+        (a, b) => Num::Rat(a.to_rational() + b.to_rational()),
+    }
+}
 
-    fn div(a: Self, b: Self) -> Result<Self, RuntimeError> {
-        match Self::promote(a, b) {
-            (Self::Int(_), Self::Int(0)) | (Self::Float(_), Self::Float(0.0)) => {
-                Err(RuntimeError::DivisionByZero)
-            }
-            (Self::Int(x), Self::Int(y)) => {
-                if x % y == 0 {
-                    Ok(Self::Int(x / y))
-                } else {
-                    // R7RS: integer division that doesn't divide
-                    // evenly produces an exact rational. We don't have
-                    // rationals in v1, so promote to inexact float.
-                    // The numeric-tower bead (nscheme-c92) will fix.
-                    #[allow(clippy::cast_precision_loss)]
-                    Ok(Self::Float(x as f64 / y as f64))
-                }
-            }
-            (Self::Float(x), Self::Float(y)) => Ok(Self::Float(x / y)),
-            _ => unreachable!(),
+fn num_sub(a: Num, b: Num) -> Num {
+    if a.is_inexact() || b.is_inexact() {
+        return Num::Float(a.to_f64() - b.to_f64());
+    }
+    match (a, b) {
+        (Num::Int(x), Num::Int(y)) => match x.checked_sub(y) {
+            Some(n) => Num::Int(n),
+            None => Num::Big(BigInt::from(x) - BigInt::from(y)),
+        },
+        (a, b) => Num::Rat(a.to_rational() - b.to_rational()),
+    }
+}
+
+fn num_mul(a: Num, b: Num) -> Num {
+    if a.is_inexact() || b.is_inexact() {
+        return Num::Float(a.to_f64() * b.to_f64());
+    }
+    match (a, b) {
+        (Num::Int(x), Num::Int(y)) => match x.checked_mul(y) {
+            Some(n) => Num::Int(n),
+            None => Num::Big(BigInt::from(x) * BigInt::from(y)),
+        },
+        (a, b) => Num::Rat(a.to_rational() * b.to_rational()),
+    }
+}
+
+fn num_div(a: Num, b: Num) -> Result<Num, RuntimeError> {
+    if a.is_inexact() || b.is_inexact() {
+        let bf = b.to_f64();
+        if bf == 0.0 {
+            return Err(RuntimeError::DivisionByZero);
         }
+        return Ok(Num::Float(a.to_f64() / bf));
     }
+    let br = b.to_rational();
+    if br.is_zero() {
+        return Err(RuntimeError::DivisionByZero);
+    }
+    Ok(Num::Rat(a.to_rational() / br))
+}
 
-    fn cmp(a: Self, b: Self) -> std::cmp::Ordering {
-        let (a, b) = Self::promote(a, b);
-        match (a, b) {
-            (Self::Int(x), Self::Int(y)) => x.cmp(&y),
-            (Self::Float(x), Self::Float(y)) => {
-                x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Less)
-            }
-            _ => unreachable!(),
-        }
+fn num_neg(a: Num) -> Num {
+    match a {
+        Num::Int(n) => match n.checked_neg() {
+            Some(m) => Num::Int(m),
+            None => Num::Big(-BigInt::from(n)),
+        },
+        Num::Big(b) => Num::Big(-b),
+        Num::Rat(r) => Num::Rat(-r),
+        Num::Float(f) => Num::Float(-f),
     }
+}
+
+fn num_is_zero(n: &Num) -> bool {
+    match n {
+        Num::Int(x) => *x == 0,
+        Num::Big(b) => b.is_zero(),
+        Num::Rat(r) => r.is_zero(),
+        Num::Float(f) => *f == 0.0,
+    }
+}
+
+fn is_integer_value(v: &Value) -> bool {
+    match v {
+        Value::Int(_) | Value::BigInt(_) => true,
+        Value::Rational(r) => One::is_one(r.denom()),
+        Value::Float(f) => f.is_finite() && f.fract() == 0.0,
+        _ => false,
+    }
+}
+
+/// Coerce a numeric `Value` to a `BigInt`. Rejects rationals,
+/// non-integral floats, and non-numbers.
+fn value_to_bigint(v: &Value) -> Result<BigInt, RuntimeError> {
+    match v {
+        Value::Int(n) => Ok(BigInt::from(*n)),
+        Value::BigInt(b) => Ok((**b).clone()),
+        Value::Rational(r) if One::is_one(r.denom()) => Ok(r.numer().clone()),
+        Value::Float(f) if f.fract() == 0.0 && f.is_finite() => {
+            BigInt::from_f64(*f).ok_or(RuntimeError::Type {
+                expected: "integer".into(),
+                got: "non-integer float".into(),
+            })
+        }
+        other => Err(RuntimeError::Type {
+            expected: "integer".into(),
+            got: other.type_name().into(),
+        }),
+    }
+}
+
+fn num_cmp(a: &Num, b: &Num) -> std::cmp::Ordering {
+    if a.is_inexact() || b.is_inexact() {
+        let x = a.to_f64();
+        let y = b.to_f64();
+        return x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Less);
+    }
+    a.to_rational().cmp(&b.to_rational())
 }
 
 // ---------------------------------------------------------------------
@@ -171,23 +268,18 @@ fn install_arithmetic(env: &EnvRef) {
         }
         let mut acc = Num::from_value(&args[0])?;
         for a in &args[1..] {
-            acc = Num::add(acc, Num::from_value(a)?)?;
+            acc = num_add(acc, Num::from_value(a)?);
         }
         Ok(acc.into_value())
     });
     define(env, "-", Arity::AtLeast(1), |args| {
         let first = Num::from_value(&args[0])?;
         if args.len() == 1 {
-            // Unary negation.
-            return Ok(match first {
-                Num::Int(n) => Num::Int(n.checked_neg().ok_or(RuntimeError::Overflow { op: "-" })?),
-                Num::Float(f) => Num::Float(-f),
-            }
-            .into_value());
+            return Ok(num_neg(first).into_value());
         }
         let mut acc = first;
         for a in &args[1..] {
-            acc = Num::sub(acc, Num::from_value(a)?)?;
+            acc = num_sub(acc, Num::from_value(a)?);
         }
         Ok(acc.into_value())
     });
@@ -197,82 +289,72 @@ fn install_arithmetic(env: &EnvRef) {
         }
         let mut acc = Num::from_value(&args[0])?;
         for a in &args[1..] {
-            acc = Num::mul(acc, Num::from_value(a)?)?;
+            acc = num_mul(acc, Num::from_value(a)?);
         }
         Ok(acc.into_value())
     });
     define(env, "/", Arity::AtLeast(1), |args| {
         let first = Num::from_value(&args[0])?;
         if args.len() == 1 {
-            return Num::div(Num::Int(1), first).map(Num::into_value);
+            return Ok(num_div(Num::Int(1), first)?.into_value());
         }
         let mut acc = first;
         for a in &args[1..] {
-            acc = Num::div(acc, Num::from_value(a)?)?;
+            acc = num_div(acc, Num::from_value(a)?)?;
         }
         Ok(acc.into_value())
     });
     define(env, "quotient", Arity::Exact(2), |args| {
-        let (Value::Int(a), Value::Int(b)) = (&args[0], &args[1]) else {
-            return Err(RuntimeError::Type {
-                expected: "two integers".into(),
-                got: format!("{}, {}", args[0].type_name(), args[1].type_name()),
-            });
-        };
-        if *b == 0 {
+        let a = value_to_bigint(&args[0])?;
+        let b = value_to_bigint(&args[1])?;
+        if b.is_zero() {
             return Err(RuntimeError::DivisionByZero);
         }
-        // R7RS quotient: truncation toward zero (Rust's / on i64 does this).
-        Ok(Value::Int(a / b))
+        // R7RS quotient: truncation toward zero.
+        Ok(bigint_to_value(a / b))
     });
     define(env, "remainder", Arity::Exact(2), |args| {
-        let (Value::Int(a), Value::Int(b)) = (&args[0], &args[1]) else {
-            return Err(RuntimeError::Type {
-                expected: "two integers".into(),
-                got: format!("{}, {}", args[0].type_name(), args[1].type_name()),
-            });
-        };
-        if *b == 0 {
+        let a = value_to_bigint(&args[0])?;
+        let b = value_to_bigint(&args[1])?;
+        if b.is_zero() {
             return Err(RuntimeError::DivisionByZero);
         }
-        // R7RS remainder: same sign as dividend (Rust's % on i64).
-        Ok(Value::Int(a % b))
+        // R7RS remainder: same sign as dividend.
+        Ok(bigint_to_value(a % b))
     });
     define(env, "modulo", Arity::Exact(2), |args| {
-        let (Value::Int(a), Value::Int(b)) = (&args[0], &args[1]) else {
-            return Err(RuntimeError::Type {
-                expected: "two integers".into(),
-                got: format!("{}, {}", args[0].type_name(), args[1].type_name()),
-            });
-        };
-        if *b == 0 {
+        let a = value_to_bigint(&args[0])?;
+        let b = value_to_bigint(&args[1])?;
+        if b.is_zero() {
             return Err(RuntimeError::DivisionByZero);
         }
+        let r = &a % &b;
         // R7RS modulo: same sign as divisor.
-        let r = a % b;
-        let m = if (r != 0) && ((r < 0) != (*b < 0)) {
+        let m = if !r.is_zero() && (r.sign() != b.sign()) {
             r + b
         } else {
             r
         };
-        Ok(Value::Int(m))
+        Ok(bigint_to_value(m))
     });
-    define(env, "abs", Arity::Exact(1), |args| match &args[0] {
-        Value::Int(n) => Ok(Value::Int(
-            n.checked_abs()
-                .ok_or(RuntimeError::Overflow { op: "abs" })?,
-        )),
-        Value::Float(f) => Ok(Value::Float(f.abs())),
-        other => Err(RuntimeError::Type {
-            expected: "number".into(),
-            got: other.type_name().into(),
-        }),
+    define(env, "abs", Arity::Exact(1), |args| {
+        let n = Num::from_value(&args[0])?;
+        Ok(match n {
+            Num::Int(x) => match x.checked_abs() {
+                Some(m) => Num::Int(m),
+                None => Num::Big(BigInt::from(x).abs()),
+            },
+            Num::Big(b) => Num::Big(b.abs()),
+            Num::Rat(r) => Num::Rat(r.abs()),
+            Num::Float(f) => Num::Float(f.abs()),
+        }
+        .into_value())
     });
     define(env, "min", Arity::AtLeast(1), |args| {
         let mut best = Num::from_value(&args[0])?;
         for a in &args[1..] {
             let n = Num::from_value(a)?;
-            if Num::cmp(n, best) == std::cmp::Ordering::Less {
+            if num_cmp(&n, &best) == std::cmp::Ordering::Less {
                 best = n;
             }
         }
@@ -282,7 +364,7 @@ fn install_arithmetic(env: &EnvRef) {
         let mut best = Num::from_value(&args[0])?;
         for a in &args[1..] {
             let n = Num::from_value(a)?;
-            if Num::cmp(n, best) == std::cmp::Ordering::Greater {
+            if num_cmp(&n, &best) == std::cmp::Ordering::Greater {
                 best = n;
             }
         }
@@ -301,7 +383,7 @@ fn check_numeric_chain(
     let mut prev = Num::from_value(&args[0])?;
     for a in &args[1..] {
         let cur = Num::from_value(a)?;
-        if !pass(Num::cmp(prev, cur)) {
+        if !pass(num_cmp(&prev, &cur)) {
             return Ok(Value::Bool(false));
         }
         prev = cur;
@@ -349,14 +431,20 @@ fn install_predicates(env: &EnvRef) {
         Ok(Value::Bool(a[0].is_number()))
     });
     define(env, "integer?", Arity::Exact(1), |a| {
-        Ok(Value::Bool(matches!(a[0], Value::Int(_))))
+        Ok(Value::Bool(is_integer_value(&a[0])))
     });
     define(env, "real?", Arity::Exact(1), |a| {
-        // In v1 the numeric tower is Int + Float, so any number is real.
+        // In v1 (no complex), every number is real.
         Ok(Value::Bool(a[0].is_number()))
     });
+    define(env, "rational?", Arity::Exact(1), |a| {
+        Ok(Value::Bool(
+            matches!(a[0], Value::Int(_) | Value::BigInt(_) | Value::Rational(_))
+                || matches!(a[0], Value::Float(f) if f.is_finite()),
+        ))
+    });
     define(env, "exact?", Arity::Exact(1), |a| match &a[0] {
-        Value::Int(_) => Ok(Value::Bool(true)),
+        Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(true)),
         Value::Float(_) => Ok(Value::Bool(false)),
         other => Err(RuntimeError::Type {
             expected: "number".into(),
@@ -365,35 +453,27 @@ fn install_predicates(env: &EnvRef) {
     });
     define(env, "inexact?", Arity::Exact(1), |a| match &a[0] {
         Value::Float(_) => Ok(Value::Bool(true)),
-        Value::Int(_) => Ok(Value::Bool(false)),
+        Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(false)),
         other => Err(RuntimeError::Type {
             expected: "number".into(),
             got: other.type_name().into(),
         }),
     });
-    define(env, "zero?", Arity::Exact(1), |a| match &a[0] {
-        Value::Int(n) => Ok(Value::Bool(*n == 0)),
-        Value::Float(f) => Ok(Value::Bool(*f == 0.0)),
-        other => Err(RuntimeError::Type {
-            expected: "number".into(),
-            got: other.type_name().into(),
-        }),
+    define(env, "zero?", Arity::Exact(1), |a| {
+        let n = Num::from_value(&a[0])?;
+        Ok(Value::Bool(num_is_zero(&n)))
     });
-    define(env, "positive?", Arity::Exact(1), |a| match &a[0] {
-        Value::Int(n) => Ok(Value::Bool(*n > 0)),
-        Value::Float(f) => Ok(Value::Bool(*f > 0.0)),
-        other => Err(RuntimeError::Type {
-            expected: "number".into(),
-            got: other.type_name().into(),
-        }),
+    define(env, "positive?", Arity::Exact(1), |a| {
+        let n = Num::from_value(&a[0])?;
+        Ok(Value::Bool(
+            num_cmp(&n, &Num::Int(0)) == std::cmp::Ordering::Greater,
+        ))
     });
-    define(env, "negative?", Arity::Exact(1), |a| match &a[0] {
-        Value::Int(n) => Ok(Value::Bool(*n < 0)),
-        Value::Float(f) => Ok(Value::Bool(*f < 0.0)),
-        other => Err(RuntimeError::Type {
-            expected: "number".into(),
-            got: other.type_name().into(),
-        }),
+    define(env, "negative?", Arity::Exact(1), |a| {
+        let n = Num::from_value(&a[0])?;
+        Ok(Value::Bool(
+            num_cmp(&n, &Num::Int(0)) == std::cmp::Ordering::Less,
+        ))
     });
     define(env, "string?", Arity::Exact(1), |a| {
         Ok(Value::Bool(a[0].is_string()))
@@ -648,21 +728,61 @@ fn assoc_with(
 // ---------------------------------------------------------------------
 
 fn install_misc(env: &EnvRef) {
-    define(env, "exact->inexact", Arity::Exact(1), |a| match &a[0] {
-        #[allow(clippy::cast_precision_loss)]
-        Value::Int(n) => Ok(Value::Float(*n as f64)),
-        Value::Float(f) => Ok(Value::Float(*f)),
+    define(env, "exact->inexact", Arity::Exact(1), |a| {
+        let n = Num::from_value(&a[0])?;
+        Ok(Value::Float(n.to_f64()))
+    });
+    define(env, "inexact->exact", Arity::Exact(1), |a| match &a[0] {
+        Value::Float(f) => {
+            if !f.is_finite() {
+                return Err(RuntimeError::Other(format!("cannot convert {f} to exact")));
+            }
+            let r = BigRational::from_f64(*f)
+                .ok_or_else(|| RuntimeError::Other(format!("cannot convert {f} to exact")))?;
+            Ok(rational_to_value(r))
+        }
+        Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(a[0].clone()),
         other => Err(RuntimeError::Type {
             expected: "number".into(),
             got: other.type_name().into(),
         }),
     });
-    define(env, "inexact->exact", Arity::Exact(1), |a| match &a[0] {
-        #[allow(clippy::cast_possible_truncation)]
-        Value::Float(f) => Ok(Value::Int(*f as i64)),
+    define(env, "exact", Arity::Exact(1), |a| {
+        // R7RS `exact` is the modern alias for `inexact->exact`.
+        match &a[0] {
+            Value::Float(f) => {
+                if !f.is_finite() {
+                    return Err(RuntimeError::Other(format!("cannot convert {f} to exact")));
+                }
+                let r = BigRational::from_f64(*f)
+                    .ok_or_else(|| RuntimeError::Other(format!("cannot convert {f} to exact")))?;
+                Ok(rational_to_value(r))
+            }
+            Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(a[0].clone()),
+            other => Err(RuntimeError::Type {
+                expected: "number".into(),
+                got: other.type_name().into(),
+            }),
+        }
+    });
+    define(env, "inexact", Arity::Exact(1), |a| {
+        let n = Num::from_value(&a[0])?;
+        Ok(Value::Float(n.to_f64()))
+    });
+    define(env, "numerator", Arity::Exact(1), |a| match &a[0] {
         Value::Int(n) => Ok(Value::Int(*n)),
+        Value::BigInt(b) => Ok(Value::BigInt(b.clone())),
+        Value::Rational(r) => Ok(bigint_to_value(r.numer().clone())),
         other => Err(RuntimeError::Type {
-            expected: "number".into(),
+            expected: "rational".into(),
+            got: other.type_name().into(),
+        }),
+    });
+    define(env, "denominator", Arity::Exact(1), |a| match &a[0] {
+        Value::Int(_) | Value::BigInt(_) => Ok(Value::Int(1)),
+        Value::Rational(r) => Ok(bigint_to_value(r.denom().clone())),
+        other => Err(RuntimeError::Type {
+            expected: "rational".into(),
             got: other.type_name().into(),
         }),
     });
@@ -735,10 +855,50 @@ mod tests {
     }
 
     #[test]
-    fn integer_division_promotes_to_float_when_inexact() {
-        // 1/3 isn't exact in our v1 numeric tower, so it becomes a float.
+    fn factorial_30_uses_bignum() {
+        // 30! overflows i64. Verify the result is a BigInt with the
+        // canonical 30! value.
+        let src = "(define (fact n) (if (= n 0) 1 (* n (fact (- n 1)))))
+                   (fact 30)";
+        let v = run(src).unwrap();
+        let expected = "265252859812191058636308480000000";
+        match v {
+            Value::BigInt(b) => assert_eq!(b.to_string(), expected),
+            other => panic!("expected BigInt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rational_arithmetic_stays_exact() {
+        // (+ 1/2 1/3) = 5/6
+        let v = run("(+ 1/2 1/3)").unwrap();
+        match v {
+            Value::Rational(r) => {
+                assert_eq!(r.numer().to_string(), "5");
+                assert_eq!(r.denom().to_string(), "6");
+            }
+            other => panic!("expected Rational, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mixing_exact_and_inexact_yields_inexact() {
+        // (+ 1/2 0.5) = 1.0 (inexact)
+        let v = run("(+ 1/2 0.5)").unwrap();
+        assert!(matches!(v, Value::Float(f) if (f - 1.0).abs() < 1e-12));
+    }
+
+    #[test]
+    fn integer_division_produces_exact_rational() {
+        // 1/3 is an exact rational with the full numeric tower.
         let v = run("(/ 1 3)").unwrap();
-        assert!(matches!(v, Value::Float(f) if (f - 0.333_333_333_333_333_3).abs() < 1e-9));
+        match v {
+            Value::Rational(r) => {
+                assert_eq!(r.numer().to_string(), "1");
+                assert_eq!(r.denom().to_string(), "3");
+            }
+            other => panic!("expected Rational, got {other:?}"),
+        }
     }
 
     #[test]

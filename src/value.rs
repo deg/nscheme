@@ -27,6 +27,8 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
+use num_bigint::BigInt;
+use num_rational::BigRational;
 use thiserror::Error;
 
 use crate::env::EnvRef;
@@ -272,10 +274,16 @@ pub enum Value {
     Char(char),
     /// A symbol (interned).
     Symbol(Symbol),
-    /// An exact fixnum. The numeric tower bead (`nscheme-c92`) will add
-    /// bignum and rational variants.
+    /// An exact fixnum (fast path for small integers).
     Int(i64),
-    /// An inexact real.
+    /// An exact arbitrary-precision integer. Only used when a result
+    /// overflows `i64`; smaller values stay as `Int` for speed.
+    BigInt(Rc<BigInt>),
+    /// An exact rational number with arbitrary-precision numerator and
+    /// denominator. Always in lowest terms with a positive denominator
+    /// (the invariant `num_rational::BigRational` maintains).
+    Rational(Rc<BigRational>),
+    /// An inexact real (R7RS `flonum`).
     Float(f64),
     /// A mutable string.
     String(Rc<RefCell<String>>),
@@ -339,7 +347,10 @@ impl Value {
     }
 
     pub fn is_number(&self) -> bool {
-        matches!(self, Self::Int(_) | Self::Float(_))
+        matches!(
+            self,
+            Self::Int(_) | Self::BigInt(_) | Self::Rational(_) | Self::Float(_)
+        )
     }
 
     pub fn is_string(&self) -> bool {
@@ -414,7 +425,7 @@ impl Value {
             Self::Bool(_) => "boolean",
             Self::Char(_) => "char",
             Self::Symbol(_) => "symbol",
-            Self::Int(_) | Self::Float(_) => "number",
+            Self::Int(_) | Self::BigInt(_) | Self::Rational(_) | Self::Float(_) => "number",
             Self::String(_) => "string",
             Self::Pair(_) => "pair",
             Self::Vector(_) => "vector",
@@ -440,15 +451,13 @@ pub fn eq(a: &Value, b: &Value) -> bool {
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Char(x), Value::Char(y)) => x == y,
         (Value::Symbol(x), Value::Symbol(y)) => x == y,
-        // R7RS §6.1: eq? on numbers is implementation-defined for
-        // numbers; we choose value equality on fixnums (cheap), and
-        // pointer equality once heap numeric variants land.
+        // R7RS §6.1: eq? on numbers is implementation-defined. We use
+        // value equality on unboxed numbers (Int / Float) and pointer
+        // equality on heap-allocated numbers (BigInt / Rational).
         (Value::Int(x), Value::Int(y)) => x == y,
-        // Floats: eq? is allowed to return #f even for equal values.
-        // We pick the strict-pointer-equivalent behavior, which for
-        // unboxed f64 means value equality with `to_bits` to distinguish
-        // -0.0 from 0.0 and any NaN from itself.
         (Value::Float(x), Value::Float(y)) => x.to_bits() == y.to_bits(),
+        (Value::BigInt(x), Value::BigInt(y)) => Rc::ptr_eq(x, y),
+        (Value::Rational(x), Value::Rational(y)) => Rc::ptr_eq(x, y),
         (Value::String(x), Value::String(y)) => Rc::ptr_eq(x, y),
         (Value::Pair(x), Value::Pair(y)) => Rc::ptr_eq(x, y),
         (Value::Vector(x), Value::Vector(y)) => Rc::ptr_eq(x, y),
@@ -460,20 +469,34 @@ pub fn eq(a: &Value, b: &Value) -> bool {
 }
 
 /// R7RS `eqv?` (§6.1). Like `eq?` but with numeric equality across
-/// exact representations. For nscheme v1 (Int + Float only) `eqv?`
-/// behaves identically to `eq?` on numbers; T12 will refine.
+/// exact representations. Numbers are `eqv?` iff they have the same
+/// exactness and represent the same mathematical value, so e.g.
+/// `(eqv? 1 1)` is `#t` but `(eqv? 1 1.0)` is `#f`.
 pub fn eqv(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        // `eqv?` compares numbers by mathematical value but only within
-        // the same exactness. (Int, Float) cross-comparison returns #f.
-        (Value::Int(x), Value::Int(y)) => x == y,
+        // Within the exact tower — promote both to BigRational for the
+        // mathematical compare (cheap because num-rational normalizes).
+        (
+            Value::Int(_) | Value::BigInt(_) | Value::Rational(_),
+            Value::Int(_) | Value::BigInt(_) | Value::Rational(_),
+        ) => exact_to_rational(a) == exact_to_rational(b),
         (Value::Float(x), Value::Float(y)) => {
-            // R7RS §6.1: NaN is eqv? to itself (the bit-pattern rule
-            // matches our eq? above).
+            // R7RS §6.1: NaN is eqv? to itself.
             x.to_bits() == y.to_bits()
         }
-        // Everything else: same rule as eq?.
+        // Cross-exactness comparisons are always #f.
         _ => eq(a, b),
+    }
+}
+
+/// Promote any of `Int` / `BigInt` / `Rational` to a `BigRational`.
+fn exact_to_rational(v: &Value) -> BigRational {
+    use num_traits::FromPrimitive;
+    match v {
+        Value::Int(n) => BigRational::from_i64(*n).expect("i64 in BigRational"),
+        Value::BigInt(b) => BigRational::from_integer((**b).clone()),
+        Value::Rational(r) => (**r).clone(),
+        _ => unreachable!("exact_to_rational called on inexact"),
     }
 }
 
@@ -560,6 +583,11 @@ fn write_value(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt::Res
         }
         Value::Symbol(s) => f.write_str(s.name()),
         Value::Int(n) => write!(f, "{n}"),
+        Value::BigInt(b) => write!(f, "{b}"),
+        Value::Rational(r) => {
+            // num-rational's Display already produces `n/d`.
+            write!(f, "{r}")
+        }
         Value::Float(x) => write_float(*x, f),
         Value::String(s) => {
             if display {
