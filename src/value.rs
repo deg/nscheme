@@ -22,7 +22,7 @@
 //! internal callers.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -763,23 +763,119 @@ fn equal_inner(
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Debug uses the same `write` form as Display by default —
-        // useful in test failure messages.
-        write_value(self, f, /*display=*/ false)
+        write_top_level(self, f, /*display=*/ false)
     }
 }
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Display uses R7RS `display` semantics (strings without quotes,
-        // characters without `#\`).
-        write_value(self, f, /*display=*/ true)
+        write_top_level(self, f, /*display=*/ true)
+    }
+}
+
+/// Top-level entry for write/display. Builds a shared-structure
+/// table first so cycles and shared references are emitted with
+/// R7RS `#N=` / `#N#` datum labels (§6.13.3) rather than recursing
+/// forever on circular structures.
+fn write_top_level(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt::Result {
+    // First pass: count occurrences of each Pair/Vector by Rc
+    // pointer identity. Values reached more than once get a label.
+    let mut counts: HashMap<usize, usize> = HashMap::new();
+    let mut visiting: HashSet<usize> = HashSet::new();
+    count_refs(v, &mut counts, &mut visiting);
+    // Second pass: emit, assigning labels lazily on first visit.
+    let mut state = LabelState {
+        counts,
+        labels: HashMap::new(),
+        next_label: 0,
+    };
+    write_value(v, f, display, &mut state)
+}
+
+#[derive(Debug)]
+struct LabelState {
+    /// Reference count per shared structure (by Rc pointer).
+    counts: HashMap<usize, usize>,
+    /// Labels assigned so far (Rc pointer → integer label).
+    labels: HashMap<usize, usize>,
+    next_label: usize,
+}
+
+fn count_refs(v: &Value, counts: &mut HashMap<usize, usize>, visiting: &mut HashSet<usize>) {
+    let key = shared_key(v);
+    if let Some(k) = key {
+        let n = counts.entry(k).and_modify(|c| *c += 1).or_insert(1);
+        // Only recurse the FIRST time we see this structure. Subsequent
+        // hits just bump the count.
+        if *n > 1 {
+            return;
+        }
+        // Cycle protection: if we're already in the middle of counting
+        // this structure (recursive self-reference), don't recurse again.
+        if !visiting.insert(k) {
+            return;
+        }
+    }
+    match v {
+        Value::Pair(p) => {
+            let cell = p.borrow();
+            count_refs(&cell.car, counts, visiting);
+            count_refs(&cell.cdr, counts, visiting);
+        }
+        Value::Vector(items) => {
+            for item in items.borrow().iter() {
+                count_refs(item, counts, visiting);
+            }
+        }
+        _ => {}
+    }
+    if let Some(k) = key {
+        visiting.remove(&k);
+    }
+}
+
+/// Return a pointer-as-usize key for values that can be shared
+/// (Pairs and Vectors). Other values are atomic / immutable from
+/// the cycle-detection perspective.
+fn shared_key(v: &Value) -> Option<usize> {
+    match v {
+        Value::Pair(p) => Some(Rc::as_ptr(p) as usize),
+        Value::Vector(p) => Some(Rc::as_ptr(p) as usize),
+        _ => None,
     }
 }
 
 /// Render a value. When `display` is false this is R7RS `write`;
-/// when true it is R7RS `display`.
-fn write_value(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt::Result {
+/// when true it is R7RS `display`. Uses `state` to emit datum labels
+/// for shared and cyclic structures.
+fn write_value(
+    v: &Value,
+    f: &mut fmt::Formatter<'_>,
+    display: bool,
+    state: &mut LabelState,
+) -> fmt::Result {
+    // If this is a shareable Pair/Vector with count > 1, emit a
+    // label on first visit and a backref on subsequent visits.
+    if let Some(key) = shared_key(v)
+        && state.counts.get(&key).copied().unwrap_or(0) > 1
+    {
+        if let Some(label) = state.labels.get(&key).copied() {
+            return write!(f, "#{label}#");
+        }
+        let label = state.next_label;
+        state.next_label += 1;
+        state.labels.insert(key, label);
+        write!(f, "#{label}=")?;
+    }
+    write_value_body(v, f, display, state)
+}
+
+fn write_value_body(
+    v: &Value,
+    f: &mut fmt::Formatter<'_>,
+    display: bool,
+    state: &mut LabelState,
+) -> fmt::Result {
     match v {
         Value::Null => f.write_str("()"),
         Value::Unspecified => f.write_str("#<unspecified>"),
@@ -823,7 +919,7 @@ fn write_value(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt::Res
                 write_string_literal(&s.borrow(), f)
             }
         }
-        Value::Pair(_) => write_list(v, f, display),
+        Value::Pair(_) => write_list(v, f, display, state),
         Value::Vector(items) => {
             f.write_str("#(")?;
             let items = items.borrow();
@@ -831,7 +927,7 @@ fn write_value(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt::Res
                 if i > 0 {
                     f.write_str(" ")?;
                 }
-                write_value(item, f, display)?;
+                write_value(item, f, display, state)?;
             }
             f.write_str(")")
         }
@@ -1031,29 +1127,50 @@ fn write_float(x: f64, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     }
 }
 
-fn write_list(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt::Result {
+/// Emit the inline body of a pair-chain inside `(…)`. The caller
+/// has already emitted any leading `#N=` label for the outermost
+/// pair. We walk the spine via `cdr`; on encountering a shared
+/// cdr we emit it as a `. #N#` (or `. #N=(…)` if first visit)
+/// dotted tail so the structure round-trips.
+fn write_list(
+    v: &Value,
+    f: &mut fmt::Formatter<'_>,
+    display: bool,
+    state: &mut LabelState,
+) -> fmt::Result {
     f.write_str("(")?;
     let mut cur = v.clone();
     let mut first = true;
     loop {
-        match cur {
-            Value::Pair(p) => {
-                if !first {
-                    f.write_str(" ")?;
-                }
-                first = false;
-                let cell = p.borrow();
-                write_value(&cell.car, f, display)?;
-                cur = cell.cdr.clone();
-            }
+        // End-of-list cases.
+        match &cur {
             Value::Null => break,
+            Value::Pair(_) => { /* fall through */ }
             other => {
-                // Improper list — print the tail after a dot.
                 f.write_str(" . ")?;
-                write_value(&other, f, display)?;
+                write_value(other, f, display, state)?;
                 break;
             }
         }
+        let Value::Pair(p) = cur else { unreachable!() };
+        let key = Rc::as_ptr(&p) as usize;
+        // For elements AFTER the first, if this cdr-pair is shared,
+        // emit it via the labeled path (dotted tail).
+        if !first && state.counts.get(&key).copied().unwrap_or(0) > 1 {
+            f.write_str(" . ")?;
+            write_value(&Value::Pair(p), f, display, state)?;
+            break;
+        }
+        if !first {
+            f.write_str(" ")?;
+        }
+        first = false;
+        let cell = p.borrow();
+        let car = cell.car.clone();
+        let cdr = cell.cdr.clone();
+        drop(cell);
+        write_value(&car, f, display, state)?;
+        cur = cdr;
     }
     f.write_str(")")
 }

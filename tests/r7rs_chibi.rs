@@ -42,10 +42,25 @@ fn read_int(env: &EnvRef, name: &str) -> Option<i64> {
 
 #[test]
 fn chibi_r7rs_tests_baseline() {
+    // The chibi corpus pushes some primitives (notably `equal?` /
+    // `write` on long shared lists) through deep host-level
+    // recursion. cargo test threads default to a 2 MiB stack on
+    // macOS — too small for some of these. We re-run the body on
+    // a thread with a generous explicit stack so cargo test
+    // matches `cargo run`'s behavior.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(chibi_baseline_inner)
+        .expect("spawn")
+        .join()
+        .expect("worker thread");
+}
+
+fn chibi_baseline_inner() {
     // Pass-count floor. As nscheme grows toward full R7RS-small the
     // baseline should be ratcheted up. Lowering it requires
     // justification (regression triage in the failing bead).
-    const BASELINE_MIN_PASSES: i64 = 1010;
+    const BASELINE_MIN_PASSES: i64 = 1020;
 
     let env = Env::new_global();
     install_base(&env).expect("install_base");
@@ -66,15 +81,8 @@ fn chibi_r7rs_tests_baseline() {
     // documents what's there. Lifting an entry off this list requires
     // either fixing the underlying interpreter gap or proving the
     // form now terminates.
-    let skip: std::collections::HashSet<usize> = [
-        // 941 onward is a dynamic-wind / call/cc interaction battery
-        // that relies on dynamic-wind firing during continuation
-        // jumps — nscheme v1 doesn't implement that (see ADR 0004).
-        // The forms don't terminate in our impl.
-        941_usize, 942, 943, 944, 945, 946, 947, 948, 949, 950,
-    ]
-    .into_iter()
-    .collect();
+    // No forms are statically skipped at this point.
+    let skip: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     let total_datums = datums.len();
     let start = Instant::now();
