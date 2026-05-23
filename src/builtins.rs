@@ -256,13 +256,16 @@ fn value_to_bigint(v: &Value) -> Result<BigInt, RuntimeError> {
     }
 }
 
-fn num_cmp(a: &Num, b: &Num) -> std::cmp::Ordering {
+/// R7RS-style numeric comparison. Returns `None` if either operand is
+/// a NaN (R7RS §6.2.6: NaN comparisons must yield `#f`); otherwise
+/// returns the `Ordering` of the mathematical values.
+fn num_cmp(a: &Num, b: &Num) -> Option<std::cmp::Ordering> {
     if a.is_inexact() || b.is_inexact() {
         let x = a.to_f64();
         let y = b.to_f64();
-        return x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Less);
+        return x.partial_cmp(&y);
     }
-    a.to_rational().cmp(&b.to_rational())
+    Some(a.to_rational().cmp(&b.to_rational()))
 }
 
 // ---------------------------------------------------------------------
@@ -419,7 +422,7 @@ fn install_arithmetic(env: &EnvRef) {
         let mut best = Num::from_value(&args[0])?;
         for a in &args[1..] {
             let n = Num::from_value(a)?;
-            if num_cmp(&n, &best) == std::cmp::Ordering::Less {
+            if num_cmp(&n, &best) == Some(std::cmp::Ordering::Less) {
                 best = n;
             }
         }
@@ -429,7 +432,7 @@ fn install_arithmetic(env: &EnvRef) {
         let mut best = Num::from_value(&args[0])?;
         for a in &args[1..] {
             let n = Num::from_value(a)?;
-            if num_cmp(&n, &best) == std::cmp::Ordering::Greater {
+            if num_cmp(&n, &best) == Some(std::cmp::Ordering::Greater) {
                 best = n;
             }
         }
@@ -448,8 +451,10 @@ fn check_numeric_chain(
     let mut prev = Num::from_value(&args[0])?;
     for a in &args[1..] {
         let cur = Num::from_value(a)?;
-        if !pass(num_cmp(&prev, &cur)) {
-            return Ok(Value::Bool(false));
+        // R7RS: comparisons involving NaN are #f.
+        match num_cmp(&prev, &cur) {
+            Some(ord) if pass(ord) => {}
+            _ => return Ok(Value::Bool(false)),
         }
         prev = cur;
     }
@@ -549,13 +554,13 @@ fn install_predicates(env: &EnvRef) {
     define(env, "positive?", Arity::Exact(1), |a| {
         let n = Num::from_value(&a[0])?;
         Ok(Value::Bool(
-            num_cmp(&n, &Num::Int(0)) == std::cmp::Ordering::Greater,
+            num_cmp(&n, &Num::Int(0)) == Some(std::cmp::Ordering::Greater),
         ))
     });
     define(env, "negative?", Arity::Exact(1), |a| {
         let n = Num::from_value(&a[0])?;
         Ok(Value::Bool(
-            num_cmp(&n, &Num::Int(0)) == std::cmp::Ordering::Less,
+            num_cmp(&n, &Num::Int(0)) == Some(std::cmp::Ordering::Less),
         ))
     });
     define(env, "string?", Arity::Exact(1), |a| {

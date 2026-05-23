@@ -102,6 +102,32 @@ The `error` procedure is defined in the Scheme bootstrap:
   (raise (apply make-error-object msg irritants)))
 ```
 
+## Errors from primitives become raises
+
+R7RS §6.11 requires that exceptional conditions ("an error has been
+detected") flow through the same handler mechanism as user-level
+`raise`. So a built-in like `(/ 1 0)` or `(car '())` must be
+catchable by `(guard …)` rather than escaping as a host-language
+error.
+
+`step_apply` for `Procedure::Primitive` converts any `RuntimeError`
+the body returns into a `Step::Raise(error-object, continuable=false)`
+via `runtime_error_to_value`. Two variants of `RuntimeError`,
+`FileError` and `ReadError`, are tagged on conversion with
+`ErrorKind::File` / `ErrorKind::Read` so the R7RS predicates
+`file-error?` and `read-error?` discriminate them. Primitives that
+need this routing (`delete-file`, `open-input-file`, `(read)`)
+return those variants explicitly.
+
+Arity mismatches at primitive call sites also use this path: they
+construct a `RuntimeError::Arity` and route it through the same
+raise machinery.
+
+The same conversion applies inside `apply`'s splice when the last
+argument isn't a proper list — that's a runtime condition, not a
+compile-time malformation, so it's a raise rather than an
+`EvalError::MalformedForm`.
+
 ## Consequences
 
 ### Positive
@@ -114,6 +140,7 @@ The `error` procedure is defined in the Scheme bootstrap:
   whatever `with-exception-handler` and `call/cc` do.
 - Handlers are not active during their own invocation (since they're
   popped from the frame stack when invoked) — R7RS-correct.
+- Built-in errors are catchable by user code, matching R7RS §6.11.
 
 ### Negative
 

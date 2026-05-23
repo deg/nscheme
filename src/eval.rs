@@ -2458,9 +2458,14 @@ fn resume(frame: Frame, value: Value, frames: &mut Vec<Frame>) -> Result<Step, E
                                 cur = pair.cdr.clone();
                             }
                             _ => {
-                                return Err(EvalError::malformed(
-                                    "apply",
-                                    "last argument must be a proper list",
+                                // Runtime condition (not a compile-time
+                                // malformation): raise so handlers can
+                                // catch.
+                                return Ok(Step::Raise(
+                                    runtime_error_to_value(RuntimeError::Other(
+                                        "apply: last argument must be a proper list".into(),
+                                    )),
+                                    false,
                                 ));
                             }
                         }

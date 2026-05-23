@@ -245,7 +245,7 @@ See [`docs/`](docs/) for architecture decision records:
 - 0002 — Numeric tower
 - 0003 — `syntax-rules` hygiene via alpha-renaming
 - 0004 — Continuations as cloned frame stacks
-- 0005 — Exception handling
+- 0005 — Exception handling (incl. how primitive errors flow as raises)
 - 0006 — Library / module system
 
 ADR 0001 is the load-bearing one: it explains why the evaluator is a
@@ -260,7 +260,7 @@ calls, and why that choice makes TCO and `call/cc` cheap.
 cargo test
 ```
 
-That runs about **330 tests across 16 files** in a few seconds.
+That runs about **335 tests across 16 files** in a few seconds, plus the chibi conformance corpus separately.
 The suite covers each module's unit tests plus end-to-end
 integration tests for evaluation, tail calls, special forms,
 the base library, I/O, macros, libraries, continuations,
@@ -294,12 +294,25 @@ Sample output:
 ```
 === chibi r7rs-tests.scm baseline ===
   total datums:     1180
-  evaluated:        1180
-  passes:           482
-  failures:         47
-  top-level errors: 575
-  duration:         ~120ms
+  evaluated:        1170
+  passes:           1017
+  failures:         83
+  top-level errors: 67
+  duration:         ~200ms
 ```
+
+That's ~86% of the corpus's individual test assertions passing.
+The remaining failures and errors fall into a few buckets:
+
+- Complex numbers (`make-rectangular`, `magnitude` on `a+bi`, etc.)
+  are not implemented in v1.
+- Datum labels (`#0=` / `#0#` for circular reads) and the
+  `#!fold-case` directive aren't recognized by the reader.
+- A few R7RS corners depend on `dynamic-wind` firing on continuation
+  jumps (10 skipped forms; see ADR 0004).
+- A handful of failures are float-precision artifacts where chibi's
+  reference output uses 15 significant digits and Rust's default
+  `f64` formatting uses up to 17.
 
 The `top-level errors` are mostly references to procedures nscheme
 v1 doesn't implement (see "Documented gaps" above). The
