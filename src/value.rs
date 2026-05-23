@@ -186,6 +186,16 @@ pub enum Procedure {
     /// by returning the supplied value to whatever was about to happen
     /// when the continuation was captured.
     Continuation { frames: Vec<crate::eval::Frame> },
+    /// An R7RS parameter object (§4.2.6, §6.10). Calling it with no
+    /// args returns the current value; calling with one arg sets it.
+    /// `parameterize` save/restores via the cell.
+    Parameter { cell: Rc<ParameterCell> },
+}
+
+/// The mutable interior of a [`Procedure::Parameter`].
+#[derive(Debug)]
+pub struct ParameterCell {
+    pub value: RefCell<Value>,
 }
 
 impl Procedure {
@@ -194,6 +204,7 @@ impl Procedure {
             Self::Primitive { name, .. } => name,
             Self::Closure { name, .. } => name.as_deref().unwrap_or("anonymous"),
             Self::Continuation { .. } => "continuation",
+            Self::Parameter { .. } => "parameter",
         }
     }
 }
@@ -218,6 +229,7 @@ impl fmt::Debug for Procedure {
                 .debug_struct("Continuation")
                 .field("frame_count", &frames.len())
                 .finish_non_exhaustive(),
+            Self::Parameter { .. } => f.debug_struct("Parameter").finish_non_exhaustive(),
         }
     }
 }

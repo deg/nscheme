@@ -177,6 +177,11 @@ pub enum Frame {
     /// expression has finished evaluating, install it as an
     /// `ExceptionHandler` frame and call the thunk.
     InstallHandler { thunk_expr: Value, env: EnvRef },
+    /// Restore parameter values when a `parameterize` form's body
+    /// completes (or unwinds via raise — see `Step::Raise` handling).
+    ParameterRestore {
+        saved: Vec<(Rc<crate::value::ParameterCell>, Value)>,
+    },
 }
 
 // ---------------------------------------------------------------------
@@ -207,13 +212,20 @@ pub fn eval(expr: Value, env: EnvRef) -> Result<Value, EvalError> {
                 // the raise and the handler so the handler's return
                 // value substitutes for the raise expression. For plain
                 // raise we discard them and push ReRaise so the
-                // handler's return is re-raised.
+                // handler's return is re-raised. ParameterRestore
+                // frames fire as we unwind so parameterize's old
+                // values survive uncaught raises.
                 let mut popped: Vec<Frame> = Vec::new();
                 let mut handler_found = None;
                 while let Some(frame) = frames.pop() {
                     if let Frame::ExceptionHandler { handler, env: _ } = frame {
                         handler_found = Some(handler);
                         break;
+                    }
+                    if let Frame::ParameterRestore { saved } = &frame {
+                        for (cell, old) in saved {
+                            *cell.value.borrow_mut() = old.clone();
+                        }
                     }
                     popped.push(frame);
                 }
@@ -332,6 +344,7 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
             "delay" => return step_delay(tail, env),
             "let-values" => return step_let_values(tail, env, frames, false),
             "let*-values" => return step_let_values(tail, env, frames, true),
+            "parameterize" => return step_parameterize(tail, env, frames),
             "raise" => return step_raise_with_frames(tail, env, false, frames),
             "raise-continuable" => return step_raise_with_frames(tail, env, true, frames),
             "with-exception-handler" => {
@@ -563,6 +576,67 @@ fn step_apply_form(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<
         env: env.clone(),
     });
     Ok(Step::Eval(proc_expr, env))
+}
+
+/// `(parameterize ((param value) ...) body...)` — dynamically rebind
+/// each `param` to `value` for the dynamic extent of `body`. Uses
+/// synchronous evaluation for the binding expressions (the typical
+/// case — they're short — and avoids growing the frame enum further
+/// with intermediate states).
+fn step_parameterize(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    use std::rc::Rc as StdRc;
+    let (bindings_form, body_tail) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("parameterize", "expected bindings and body"))?;
+    let bindings = collect_list(&bindings_form)
+        .map_err(|()| EvalError::malformed("parameterize", "bindings must be a proper list"))?;
+    let body = collect_list(&body_tail)
+        .map_err(|()| EvalError::malformed("parameterize", "body must be a proper list"))?;
+    if body.is_empty() {
+        return Err(EvalError::malformed(
+            "parameterize",
+            "body must not be empty",
+        ));
+    }
+
+    let mut saved: Vec<(StdRc<crate::value::ParameterCell>, Value)> = Vec::new();
+    for binding in bindings {
+        let parts = collect_list(&binding)
+            .map_err(|()| EvalError::malformed("parameterize", "binding must be a list"))?;
+        if parts.len() != 2 {
+            return Err(EvalError::malformed(
+                "parameterize",
+                "binding must be (param value)",
+            ));
+        }
+        // Evaluate the param expression synchronously.
+        let param_val = eval(parts[0].clone(), env.clone())?;
+        let cell = match &param_val {
+            Value::Procedure(p) => match &**p {
+                Procedure::Parameter { cell } => cell.clone(),
+                _ => {
+                    return Err(EvalError::malformed(
+                        "parameterize",
+                        "first item of each binding must be a parameter object",
+                    ));
+                }
+            },
+            _ => {
+                return Err(EvalError::malformed(
+                    "parameterize",
+                    "first item of each binding must be a parameter object",
+                ));
+            }
+        };
+        let new_val = eval(parts[1].clone(), env.clone())?;
+        // Save current value, install new.
+        let old = cell.value.borrow().clone();
+        *cell.value.borrow_mut() = new_val;
+        saved.push((cell, old));
+    }
+
+    frames.push(Frame::ParameterRestore { saved });
+    Ok(eval_sequence(body, env, frames))
 }
 
 /// `(let-values (((vars...) expr) ...) body...)` /
@@ -1714,6 +1788,23 @@ fn step_apply(
             let value = args.into_iter().next().unwrap_or(Value::Unspecified);
             Ok(Step::InvokeContinuation(saved.clone(), value))
         }
+        Procedure::Parameter { cell } => {
+            // R7RS: (param) returns the current value; (param new)
+            // sets it (parameterize uses this internally but it's
+            // also the public setter).
+            match args.len() {
+                0 => Ok(Step::Return(cell.value.borrow().clone())),
+                1 => {
+                    *cell.value.borrow_mut() = args.into_iter().next().unwrap();
+                    Ok(Step::Return(Value::Unspecified))
+                }
+                n => Err(EvalError::Runtime(RuntimeError::Arity {
+                    procedure: "parameter".into(),
+                    expected: "0 or 1".into(),
+                    got: n,
+                })),
+            }
+        }
     }
 }
 
@@ -1877,6 +1968,14 @@ fn resume(frame: Frame, value: Value, frames: &mut Vec<Frame>) -> Result<Step, E
         }
         Frame::ReRaise => Ok(Step::Raise(value, false)),
         Frame::RaiseAfter { continuable } => Ok(Step::Raise(value, continuable)),
+        Frame::ParameterRestore { saved } => {
+            // Body returned; restore the saved parameter values and
+            // pass the body's value through.
+            for (cell, old) in saved {
+                *cell.value.borrow_mut() = old;
+            }
+            Ok(Step::Return(value))
+        }
         Frame::InstallHandler { thunk_expr, env } => {
             // `value` is the evaluated handler. Install it and call
             // (thunk).

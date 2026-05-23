@@ -858,6 +858,12 @@ fn install_misc(env: &EnvRef) {
         // uniformly.
         other => Ok(Value::list_from([other.clone()])),
     });
+    define(env, "make-parameter", Arity::Exact(1), |a| {
+        let cell = Rc::new(crate::value::ParameterCell {
+            value: std::cell::RefCell::new(a[0].clone()),
+        });
+        Ok(Value::Procedure(Rc::new(Procedure::Parameter { cell })))
+    });
     define(env, "promise?", Arity::Exact(1), |a| {
         Ok(Value::Bool(matches!(a[0], Value::Promise(_))))
     });

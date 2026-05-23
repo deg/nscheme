@@ -4,7 +4,7 @@
 use nscheme::builtins::install_base;
 use nscheme::env::Env;
 use nscheme::eval::{EvalError, eval_source};
-use nscheme::value::{Value, equal};
+use nscheme::value::{Symbol, Value, equal};
 
 fn run(source: &str) -> Result<Value, EvalError> {
     let env = Env::new_global();
@@ -26,7 +26,6 @@ fn call_with_values_unpacks_multi() {
           (lambda () (values 10 3))
           (lambda (a b) (list 'pair a b)))
     ";
-    use nscheme::value::Symbol;
     let v = run(src).unwrap();
     let expected = Value::list_from([
         Value::Symbol(Symbol::intern("pair")),
@@ -54,7 +53,6 @@ fn call_with_values_with_zero_values() {
           (lambda () (values))
           (lambda () 'no-values))
     ";
-    use nscheme::value::Symbol;
     assert!(equal(
         &run(src).unwrap(),
         &Value::Symbol(Symbol::intern("no-values"))
