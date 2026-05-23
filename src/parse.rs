@@ -67,6 +67,26 @@ pub fn parse_program(source: &str) -> Result<Vec<Value>, ParseError> {
     Ok(datums)
 }
 
+/// Parse one datum from `source`. Returns `Ok((Some(datum), consumed))`
+/// where `consumed` is the byte offset of the first character *after*
+/// the datum (so the caller can advance a port position by exactly the
+/// right amount). Returns `Ok((None, source.len()))` if `source`
+/// contains only whitespace/comments.
+///
+/// Used by the `(read port)` primitive to drive incremental datum
+/// reading from a port without re-lexing the rest of the buffer
+/// from scratch each call.
+pub fn parse_one_with_consumed(source: &str) -> Result<(Option<Value>, usize), ParseError> {
+    let tokens = tokenize(source)?;
+    if tokens.is_empty() {
+        return Ok((None, source.len()));
+    }
+    let mut parser = Parser::new(tokens);
+    let datum = parser.parse_datum()?;
+    let consumed = parser.peek().map_or(source.len(), |t| t.span.start);
+    Ok((Some(datum), consumed))
+}
+
 /// Parse exactly one datum from a string. Returns an error if the input
 /// contains zero or more than one datum.
 pub fn parse_one(source: &str) -> Result<Value, ParseError> {

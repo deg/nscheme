@@ -20,6 +20,7 @@ use std::io::Read as _;
 use std::io::Write as _;
 use std::rc::Rc;
 
+use crate::builtins::value_to_usize;
 use crate::env::EnvRef;
 use crate::value::{Arity, Port, PrimitiveFn, Procedure, RuntimeError, Symbol, Value};
 
@@ -56,6 +57,23 @@ pub fn install_io(env: &EnvRef) {
         Value::Port(p) => Ok(Value::Bool(p.borrow().is_output())),
         _ => Ok(Value::Bool(false)),
     });
+    define_prim(env, "input-port-open?", Arity::Exact(1), |a| match &a[0] {
+        Value::Port(p) => {
+            let b = p.borrow();
+            Ok(Value::Bool(b.is_input() && !matches!(*b, Port::Closed)))
+        }
+        _ => Ok(Value::Bool(false)),
+    });
+    define_prim(env, "output-port-open?", Arity::Exact(1), |a| match &a[0] {
+        Value::Port(p) => {
+            let b = p.borrow();
+            Ok(Value::Bool(b.is_output() && !matches!(*b, Port::Closed)))
+        }
+        _ => Ok(Value::Bool(false)),
+    });
+    define_prim(env, "port?", Arity::Exact(1), |a| {
+        Ok(Value::Bool(matches!(a[0], Value::Port(_))))
+    });
     define_prim(env, "textual-port?", Arity::Exact(1), |a| {
         // Every port in v1 is textual.
         Ok(Value::Bool(matches!(a[0], Value::Port(_))))
@@ -86,6 +104,108 @@ pub fn install_io(env: &EnvRef) {
         Ok(Value::Port(Rc::new(RefCell::new(Port::StringOutput {
             buffer: String::new(),
         }))))
+    });
+    define_prim(
+        env,
+        "open-input-bytevector",
+        Arity::Exact(1),
+        |a| match &a[0] {
+            Value::Bytevector(b) => {
+                // Interpret bytes as UTF-8 if valid; otherwise create a
+                // string-input port over the raw bytes coerced to chars.
+                let bytes = b.borrow().clone();
+                let s = String::from_utf8(bytes).unwrap_or_else(|e| {
+                    // Fallback: render invalid bytes as Latin-1
+                    e.into_bytes().iter().map(|&b| b as char).collect()
+                });
+                Ok(Value::Port(Rc::new(RefCell::new(Port::StringInput {
+                    content: s,
+                    pos: 0,
+                }))))
+            }
+            other => Err(type_err("bytevector", other)),
+        },
+    );
+    define_prim(env, "open-output-bytevector", Arity::Exact(0), |_| {
+        Ok(Value::Port(Rc::new(RefCell::new(Port::StringOutput {
+            buffer: String::new(),
+        }))))
+    });
+    define_prim(
+        env,
+        "get-output-bytevector",
+        Arity::Exact(1),
+        |a| match &a[0] {
+            Value::Port(p) => match &*p.borrow() {
+                Port::StringOutput { buffer } => Ok(Value::bytevector(buffer.as_bytes().to_vec())),
+                _ => Err(RuntimeError::Other(
+                    "get-output-bytevector: not a bytevector output port".into(),
+                )),
+            },
+            other => Err(type_err("port", other)),
+        },
+    );
+    define_prim(
+        env,
+        "read-u8",
+        Arity::Range { min: 0, max: 1 },
+        |a| match a.first() {
+            Some(Value::Port(p)) => {
+                let mut port = p.borrow_mut();
+                match &mut *port {
+                    Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => {
+                        let bytes = content.as_bytes();
+                        if *pos >= bytes.len() {
+                            return Ok(Value::Eof);
+                        }
+                        let b = bytes[*pos];
+                        *pos += 1;
+                        Ok(Value::Int(i64::from(b)))
+                    }
+                    _ => Err(RuntimeError::Other("read-u8: not an input port".into())),
+                }
+            }
+            _ => Err(RuntimeError::Other("read-u8 requires an input port".into())),
+        },
+    );
+    define_prim(
+        env,
+        "peek-u8",
+        Arity::Range { min: 0, max: 1 },
+        |a| match a.first() {
+            Some(Value::Port(p)) => {
+                let port = p.borrow();
+                match &*port {
+                    Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => {
+                        let bytes = content.as_bytes();
+                        if *pos >= bytes.len() {
+                            return Ok(Value::Eof);
+                        }
+                        Ok(Value::Int(i64::from(bytes[*pos])))
+                    }
+                    _ => Err(RuntimeError::Other("peek-u8: not an input port".into())),
+                }
+            }
+            _ => Err(RuntimeError::Other("peek-u8 requires an input port".into())),
+        },
+    );
+    define_prim(env, "write-u8", Arity::Range { min: 1, max: 2 }, |a| {
+        let Value::Int(n) = a[0] else {
+            return Err(type_err("integer 0..255", &a[0]));
+        };
+        if !(0..=255).contains(&n) {
+            return Err(RuntimeError::Other("write-u8: value out of range".into()));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let b = n as u8;
+        write_to_port(a.get(1), &(b as char).to_string())
+    });
+    define_prim(env, "u8-ready?", Arity::Range { min: 0, max: 1 }, |_| {
+        // Conservatively report ready — we don't have non-blocking I/O.
+        Ok(Value::Bool(true))
+    });
+    define_prim(env, "char-ready?", Arity::Range { min: 0, max: 1 }, |_| {
+        Ok(Value::Bool(true))
     });
     define_prim(env, "get-output-string", Arity::Exact(1), |a| match &a[0] {
         Value::Port(p) => match &*p.borrow() {
@@ -153,6 +273,18 @@ pub fn install_io(env: &EnvRef) {
 
     // -- reading ----------------------------------------------------
 
+    define_prim(env, "read", Arity::Range { min: 0, max: 1 }, |a| {
+        match a.first() {
+            None => Err(RuntimeError::Other(
+                "read on stdin not yet supported".into(),
+            )),
+            Some(Value::Port(p)) => {
+                let mut port = p.borrow_mut();
+                read_datum_from_port(&mut port)
+            }
+            Some(other) => Err(type_err("port", other)),
+        }
+    });
     define_prim(env, "read-char", Arity::Range { min: 0, max: 1 }, |a| {
         // Default to stdin if no port given.
         match a.first() {
@@ -179,6 +311,61 @@ pub fn install_io(env: &EnvRef) {
             None => read_line_from_stdin(),
             Some(Value::Port(p)) => read_line_from_port(&mut p.borrow_mut()),
             Some(other) => Err(type_err("port", other)),
+        },
+    );
+    define_prim(env, "read-string", Arity::Range { min: 1, max: 2 }, |a| {
+        let k = value_to_usize(&a[0], "read-string")?;
+        match a.get(1) {
+            Some(Value::Port(p)) => {
+                let mut port = p.borrow_mut();
+                match &mut *port {
+                    Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => {
+                        if *pos >= content.len() {
+                            return Ok(Value::Eof);
+                        }
+                        let remaining = &content[*pos..];
+                        let take: String = remaining.chars().take(k).collect();
+                        *pos += take.len();
+                        Ok(Value::string(take))
+                    }
+                    _ => Err(RuntimeError::Other("read-string: not an input port".into())),
+                }
+            }
+            _ => Err(RuntimeError::Other(
+                "read-string requires an input port".into(),
+            )),
+        }
+    });
+    define_prim(
+        env,
+        "read-bytevector",
+        Arity::Range { min: 1, max: 2 },
+        |a| {
+            let k = value_to_usize(&a[0], "read-bytevector")?;
+            match a.get(1) {
+                Some(Value::Port(p)) => {
+                    let mut port = p.borrow_mut();
+                    match &mut *port {
+                        Port::StringInput { content, pos }
+                        | Port::FileInput { content, pos, .. } => {
+                            if *pos >= content.len() {
+                                return Ok(Value::Eof);
+                            }
+                            let bytes = content.as_bytes();
+                            let end = (*pos + k).min(bytes.len());
+                            let chunk = bytes[*pos..end].to_vec();
+                            *pos = end;
+                            Ok(Value::bytevector(chunk))
+                        }
+                        _ => Err(RuntimeError::Other(
+                            "read-bytevector: not an input port".into(),
+                        )),
+                    }
+                }
+                _ => Err(RuntimeError::Other(
+                    "read-bytevector requires an input port".into(),
+                )),
+            }
         },
     );
 
@@ -273,6 +460,25 @@ fn write_to_port(port: Option<&Value>, s: &str) -> Result<Value, RuntimeError> {
             Ok(Value::Unspecified)
         }
         Some(other) => Err(type_err("port", other)),
+    }
+}
+
+/// Read one full datum from the given input port. R7RS `(read port)`.
+/// Returns `eof-object` when no datum remains.
+fn read_datum_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
+    match port {
+        Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => {
+            let rest = &content[*pos..];
+            let (datum, consumed) = crate::parse::parse_one_with_consumed(rest)
+                .map_err(|e| RuntimeError::Other(format!("read: {e}")))?;
+            *pos += consumed;
+            Ok(datum.unwrap_or(Value::Eof))
+        }
+        Port::StdIn { .. } => Err(RuntimeError::Other(
+            "read on stdin is not supported in v1".into(),
+        )),
+        Port::Closed => Err(RuntimeError::Other("read: port is closed".into())),
+        _ => Err(RuntimeError::Other("read: not an input port".into())),
     }
 }
 

@@ -365,6 +365,18 @@ fn instantiate(
     bindings: &Bindings,
     renames: &HashMap<Symbol, Symbol>,
 ) -> Result<Value, EvalError> {
+    instantiate_inner(template, bindings, renames, false)
+}
+
+/// `escape_ellipsis = true` disables R7RS ellipsis-repetition: any
+/// `...` encountered is treated as a literal identifier. This is what
+/// `(... <template>)` activates per R7RS §4.3.2.
+fn instantiate_inner(
+    template: &Value,
+    bindings: &Bindings,
+    renames: &HashMap<Symbol, Symbol>,
+    escape_ellipsis: bool,
+) -> Result<Value, EvalError> {
     match template {
         Value::Symbol(s) => {
             if let Some(Match::Single(v)) = bindings.0.get(s) {
@@ -375,7 +387,19 @@ fn instantiate(
             }
             Ok(Value::Symbol(s.clone()))
         }
-        Value::Pair(_) => instantiate_list(template, bindings, renames),
+        Value::Pair(_) => {
+            // R7RS ellipsis escape: `(... <inner>)` expands to
+            // `<inner>` with all subsequent `...` treated as literal
+            // identifiers. The escape unwraps the outer list — the
+            // result IS `<inner>`, not `(<inner>)`.
+            if !escape_ellipsis {
+                let (elems, _) = pattern_elems(template);
+                if elems.len() == 2 && is_ellipsis(&elems[0]) {
+                    return instantiate_inner(&elems[1], bindings, renames, true);
+                }
+            }
+            instantiate_list(template, bindings, renames, escape_ellipsis)
+        }
         _ => Ok(template.clone()),
     }
 }
@@ -384,14 +408,15 @@ fn instantiate_list(
     template: &Value,
     bindings: &Bindings,
     renames: &HashMap<Symbol, Symbol>,
+    escape_ellipsis: bool,
 ) -> Result<Value, EvalError> {
     let (elems, tail) = pattern_elems(template);
     let mut out: Vec<Value> = Vec::new();
     let mut i = 0;
     while i < elems.len() {
-        // If the next element is `...`, splice the previous template
-        // element repeatedly.
-        if i + 1 < elems.len() && is_ellipsis(&elems[i + 1]) {
+        // Ellipsis-repetition is suppressed when we're inside an
+        // `(... X)` escape; in that case `...` is just a symbol.
+        if !escape_ellipsis && i + 1 < elems.len() && is_ellipsis(&elems[i + 1]) {
             // Collect the multi-binding for the variables in elems[i].
             let pattern_vars = collect_template_vars(&elems[i], bindings);
             // All vars must agree on the number of repetitions.
@@ -429,16 +454,21 @@ fn instantiate_list(
                         }
                     }
                 }
-                out.push(instantiate(&elems[i], &rep_bindings, renames)?);
+                out.push(instantiate_inner(&elems[i], &rep_bindings, renames, false)?);
             }
             i += 2;
         } else {
-            out.push(instantiate(&elems[i], bindings, renames)?);
+            out.push(instantiate_inner(
+                &elems[i],
+                bindings,
+                renames,
+                escape_ellipsis,
+            )?);
             i += 1;
         }
     }
     let tail_value = match tail {
-        Some(t) => instantiate(&t, bindings, renames)?,
+        Some(t) => instantiate_inner(&t, bindings, renames, escape_ellipsis)?,
         None => Value::Null,
     };
     // Build the list.

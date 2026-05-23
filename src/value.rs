@@ -190,6 +190,22 @@ pub enum Procedure {
     /// args returns the current value; calling with one arg sets it.
     /// `parameterize` save/restores via the cell.
     Parameter { cell: Rc<ParameterCell> },
+    /// R7RS §4.2.9 `case-lambda`: a procedure with multiple
+    /// arity-dispatched clauses. At apply time we walk `clauses` and
+    /// pick the first one whose arity matches.
+    CaseLambda {
+        clauses: Vec<CaseLambdaClause>,
+        env: EnvRef,
+        name: Option<String>,
+    },
+}
+
+/// One arity-arm of a `case-lambda` procedure.
+#[derive(Clone, Debug)]
+pub struct CaseLambdaClause {
+    pub params: Vec<Symbol>,
+    pub rest: Option<Symbol>,
+    pub body: Vec<Value>,
 }
 
 /// The mutable interior of a [`Procedure::Parameter`].
@@ -205,6 +221,7 @@ impl Procedure {
             Self::Closure { name, .. } => name.as_deref().unwrap_or("anonymous"),
             Self::Continuation { .. } => "continuation",
             Self::Parameter { .. } => "parameter",
+            Self::CaseLambda { name, .. } => name.as_deref().unwrap_or("case-lambda"),
         }
     }
 }
@@ -230,6 +247,11 @@ impl fmt::Debug for Procedure {
                 .field("frame_count", &frames.len())
                 .finish_non_exhaustive(),
             Self::Parameter { .. } => f.debug_struct("Parameter").finish_non_exhaustive(),
+            Self::CaseLambda { clauses, name, .. } => f
+                .debug_struct("CaseLambda")
+                .field("name", name)
+                .field("clauses", &clauses.len())
+                .finish_non_exhaustive(),
         }
     }
 }

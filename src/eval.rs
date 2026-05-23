@@ -173,6 +173,10 @@ pub enum Frame {
     /// `raise-continuable` finishes evaluating, this frame fires
     /// `Step::Raise(value, continuable)`.
     RaiseAfter { continuable: bool },
+    /// `(eval datum env-spec)` post-evaluation step: when the
+    /// expression argument finishes evaluating (giving us a *datum*),
+    /// re-evaluate that datum as code in the captured env.
+    EvalAfter { env: EnvRef },
     /// Helper for `with-exception-handler`: when the handler
     /// expression has finished evaluating, install it as an
     /// `ExceptionHandler` frame and call the thunk.
@@ -341,7 +345,10 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
                 return step_call_cc(tail, env, frames);
             }
             "apply" => return step_apply_form(tail, env, frames),
-            "delay" => return step_delay(tail, env),
+            "delay" | "delay-force" | "lazy" => return step_delay(tail, env),
+            "case-lambda" => return step_case_lambda(tail, env),
+            "define-values" => return step_define_values(tail, env),
+            "eval" => return step_eval_form(tail, env, frames),
             "let-values" => return step_let_values(tail, env, frames, false),
             "let*-values" => return step_let_values(tail, env, frames, true),
             "parameterize" => return step_parameterize(tail, env, frames),
@@ -694,6 +701,115 @@ fn step_let_values(
     }
     let _ = frames;
     Ok(Step::Eval(acc, env))
+}
+
+/// `(eval datum env-spec)` — evaluate `datum` in the env identified
+/// by `env-spec` (an `(environment ...)` spec or just `#t` for the
+/// global env in this v1).
+///
+/// In nscheme v1 the env-spec argument is largely ignored: we always
+/// evaluate against the current call-site env. Proper R7RS semantics
+/// would distinguish between (environment '(scheme base)), the
+/// interaction-environment, and so on. Documented limitation.
+fn step_eval_form(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    let parts = collect_list(&tail)
+        .map_err(|()| EvalError::malformed("eval", "expected (eval expr env-spec)"))?;
+    if parts.is_empty() {
+        return Err(EvalError::malformed(
+            "eval",
+            "expected at least one operand",
+        ));
+    }
+    // Evaluate the FIRST operand (the expression-as-data) and the
+    // optional env-spec; then re-evaluate the resulting datum.
+    let expr_to_eval = parts[0].clone();
+    let _env_spec = parts.get(1).cloned();
+    // Two-step: evaluate the data argument, then in the resume push
+    // the value as a new datum to evaluate. Use a small frame.
+    frames.push(Frame::EvalAfter { env: env.clone() });
+    Ok(Step::Eval(expr_to_eval, env))
+}
+
+/// `(define-values (formals) expr)` — evaluate `expr` (which must
+/// produce zero, one, or many values) and bind the resulting values
+/// to the names in `formals` in the current env.
+fn step_define_values(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
+    let (formals_form, rest) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("define-values", "expected formals and value"))?;
+    let (params, rest_param) = parse_formals(&formals_form)?;
+    let mut iter = ListIter::new(rest);
+    let value_expr = iter
+        .next()
+        .ok_or_else(|| EvalError::malformed("define-values", "expected one value expression"))??;
+    if iter.next().is_some() {
+        return Err(EvalError::malformed(
+            "define-values",
+            "expected exactly one value expression",
+        ));
+    }
+    // Evaluate synchronously. The expression typically calls `values`
+    // and we destructure into the formals.
+    let result = eval(value_expr, env.clone())?;
+    let values: Vec<Value> = match result {
+        Value::Values(vs) => (*vs).clone(),
+        single => vec![single],
+    };
+    let provided = values.len();
+    let arity_ok = match &rest_param {
+        None => provided == params.len(),
+        Some(_) => provided >= params.len(),
+    };
+    if !arity_ok {
+        return Err(EvalError::Runtime(RuntimeError::Arity {
+            procedure: "define-values".into(),
+            expected: if rest_param.is_some() {
+                format!("at least {}", params.len())
+            } else {
+                format!("exactly {}", params.len())
+            },
+            got: provided,
+        }));
+    }
+    let mut iter = values.into_iter();
+    for p in &params {
+        env.define(p.clone(), iter.next().unwrap());
+    }
+    if let Some(rest_sym) = rest_param {
+        let leftover: Vec<Value> = iter.collect();
+        env.define(rest_sym, Value::list_from(leftover));
+    }
+    Ok(Step::Return(Value::Unspecified))
+}
+
+/// `(case-lambda ((formals1) body1 ...) ((formals2) body2 ...) ...)`
+/// constructs a multi-arity dispatch procedure (R7RS §4.2.9).
+fn step_case_lambda(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
+    let clause_forms = collect_list(&tail)
+        .map_err(|()| EvalError::malformed("case-lambda", "clause list must be proper"))?;
+    let mut clauses: Vec<crate::value::CaseLambdaClause> = Vec::new();
+    for c in clause_forms {
+        let (formals_form, body_tail) = c.as_pair().ok_or_else(|| {
+            EvalError::malformed("case-lambda", "each clause must be (formals body...)")
+        })?;
+        let (params, rest) = parse_formals(&formals_form)?;
+        let body = collect_list(&body_tail)
+            .map_err(|()| EvalError::malformed("case-lambda", "body must be a proper list"))?;
+        if body.is_empty() {
+            return Err(EvalError::malformed(
+                "case-lambda",
+                "clause body must not be empty",
+            ));
+        }
+        clauses.push(crate::value::CaseLambdaClause { params, rest, body });
+    }
+    Ok(Step::Return(Value::Procedure(Rc::new(
+        Procedure::CaseLambda {
+            clauses,
+            env,
+            name: None,
+        },
+    ))))
 }
 
 /// `(delay expr)` — construct a promise that, when forced, will
@@ -1381,8 +1497,21 @@ fn step_case(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
         if parts.is_empty() {
             return Err(EvalError::malformed("case", "empty clause"));
         }
+        // R7RS allows `=> proc` in both regular and else clauses.
+        // For case the procedure is applied to the *key* (not the
+        // test result as in cond) — so we rewrite the clause body
+        // to `(proc $case-key)` rather than relying on cond's =>
+        // machinery.
+        let is_arrow =
+            parts.len() == 3 && matches!(&parts[1], Value::Symbol(s) if s.name() == "=>");
         if matches!(&parts[0], Value::Symbol(s) if s.name() == "else") {
-            cond_clauses.push(Value::list_from(parts));
+            if is_arrow {
+                let proc = parts[2].clone();
+                let call = Value::list_from([proc, key_ref.clone()]);
+                cond_clauses.push(Value::list_from([sym("else"), call]));
+            } else {
+                cond_clauses.push(Value::list_from(parts));
+            }
             continue;
         }
         let keys = collect_list(&parts[0])
@@ -1396,7 +1525,12 @@ fn step_case(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
         }
         let test = Value::list_from(or_items);
         let mut new_clause = vec![test];
-        new_clause.extend(parts.into_iter().skip(1));
+        if is_arrow {
+            let proc = parts[2].clone();
+            new_clause.push(Value::list_from([proc, key_ref.clone()]));
+        } else {
+            new_clause.extend(parts.into_iter().skip(1));
+        }
         cond_clauses.push(Value::list_from(new_clause));
     }
     let mut cond_items = vec![sym("cond")];
@@ -1788,6 +1922,38 @@ fn step_apply(
             let value = args.into_iter().next().unwrap_or(Value::Unspecified);
             Ok(Step::InvokeContinuation(saved.clone(), value))
         }
+        Procedure::CaseLambda {
+            clauses,
+            env,
+            name: _,
+        } => {
+            // Pick the first clause whose arity matches the call.
+            let provided = args.len();
+            for clause in clauses {
+                let arity_ok = match &clause.rest {
+                    None => provided == clause.params.len(),
+                    Some(_) => provided >= clause.params.len(),
+                };
+                if !arity_ok {
+                    continue;
+                }
+                let call_env = Env::extend(env.clone());
+                let mut args_iter = args.into_iter();
+                for p in &clause.params {
+                    call_env.define(p.clone(), args_iter.next().unwrap());
+                }
+                if let Some(rest_sym) = &clause.rest {
+                    let leftover: Vec<Value> = args_iter.collect();
+                    call_env.define(rest_sym.clone(), Value::list_from(leftover));
+                }
+                return Ok(eval_sequence(clause.body.clone(), call_env, frames));
+            }
+            Err(EvalError::Runtime(RuntimeError::Arity {
+                procedure: "case-lambda".into(),
+                expected: "any matching clause".into(),
+                got: provided,
+            }))
+        }
         Procedure::Parameter { cell } => {
             // R7RS: (param) returns the current value; (param new)
             // sets it (parameterize uses this internally but it's
@@ -1968,6 +2134,13 @@ fn resume(frame: Frame, value: Value, frames: &mut Vec<Frame>) -> Result<Step, E
         }
         Frame::ReRaise => Ok(Step::Raise(value, false)),
         Frame::RaiseAfter { continuable } => Ok(Step::Raise(value, continuable)),
+        Frame::EvalAfter { env } => {
+            // `value` is the datum produced by evaluating eval's
+            // first argument; re-evaluate it as code in the captured
+            // env. No new frame: this is in tail position relative
+            // to the caller of `eval`.
+            Ok(Step::Eval(value, env))
+        }
         Frame::ParameterRestore { saved } => {
             // Body returned; restore the saved parameter values and
             // pass the body's value through.
