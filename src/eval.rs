@@ -1857,9 +1857,10 @@ fn step_do(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, Ev
     Ok(Step::Eval(letrec_form, env))
 }
 
-/// `(quasiquote template)` — expand the template, treating `unquote`
-/// and `unquote-splicing` as escape hatches. v1 supports single-level
-/// quasiquote only (no nested `` ` ``).
+/// `(quasiquote template)` — expand the template. Supports nested
+/// quasiquote per R7RS §4.2.6: an inner `quasiquote` raises the
+/// nesting depth, an `unquote` / `unquote-splicing` lowers it, and
+/// only forms at depth 1 (the outermost) are actually evaluated.
 fn step_quasiquote(template: &Value, env: EnvRef) -> Result<Step, EvalError> {
     let mut iter = ListIter::new(template.clone());
     let body = iter
@@ -1871,20 +1872,18 @@ fn step_quasiquote(template: &Value, env: EnvRef) -> Result<Step, EvalError> {
             "expected exactly one template",
         ));
     }
-    let value = qq_expand(&body, &env)?;
+    let value = qq_expand(&body, &env, 1)?;
     Ok(Step::Return(value))
 }
 
-fn qq_expand(template: &Value, env: &EnvRef) -> Result<Value, EvalError> {
+fn qq_expand(template: &Value, env: &EnvRef, depth: usize) -> Result<Value, EvalError> {
     match template {
-        Value::Pair(_) => qq_expand_pair(template, env),
-        // Vectors quasiquote element-by-element.
+        Value::Pair(_) => qq_expand_pair(template, env, depth),
         Value::Vector(items) => {
             let items = items.borrow().clone();
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                // Vector elements don't support unquote-splicing per R7RS.
-                out.push(qq_expand(&item, env)?);
+                out.push(qq_expand(&item, env, depth)?);
             }
             Ok(Value::vector(out))
         }
@@ -1892,36 +1891,59 @@ fn qq_expand(template: &Value, env: &EnvRef) -> Result<Value, EvalError> {
     }
 }
 
-fn qq_expand_pair(template: &Value, env: &EnvRef) -> Result<Value, EvalError> {
-    // Check for (unquote x) as the whole template.
+fn qq_expand_pair(template: &Value, env: &EnvRef, depth: usize) -> Result<Value, EvalError> {
+    // Head-based special cases: (unquote …), (unquote-splicing …),
+    // (quasiquote …) all interact with the depth.
     if let Some((head, tail)) = template.as_pair()
         && let Value::Symbol(s) = &head
-        && s.name() == "unquote"
     {
-        let mut iter = ListIter::new(tail);
-        let expr = iter
-            .next()
-            .ok_or_else(|| EvalError::malformed("unquote", "expected one expression"))??;
-        return eval(expr, env.clone());
+        match s.name() {
+            "unquote" => {
+                if depth == 1 {
+                    // Evaluate the inner expression at depth 0.
+                    let mut iter = ListIter::new(tail);
+                    let expr = iter.next().ok_or_else(|| {
+                        EvalError::malformed("unquote", "expected one expression")
+                    })??;
+                    return eval(expr, env.clone());
+                }
+                // Nested: emit literal `(unquote …)` and recurse
+                // inside at depth - 1.
+                let inner = qq_expand(&tail, env, depth - 1)?;
+                return Ok(Value::cons(head, inner));
+            }
+            "quasiquote" => {
+                // Nested quasiquote raises depth; emit literal head.
+                let inner = qq_expand(&tail, env, depth + 1)?;
+                return Ok(Value::cons(head, inner));
+            }
+            _ => {}
+        }
     }
-    // Otherwise, walk car and cdr.
+    // Walk car and cdr. Check if car is an (unquote-splicing …) form
+    // for the splice-into-tail behavior.
     let (head, tail) = template.as_pair().expect("pair");
-    // Check if head is (unquote-splicing x) — then splice into the
-    // result of recursing on tail.
     if let Some((h_head, h_tail)) = head.as_pair()
         && let Value::Symbol(s) = &h_head
         && s.name() == "unquote-splicing"
     {
-        let mut iter = ListIter::new(h_tail);
-        let expr = iter
-            .next()
-            .ok_or_else(|| EvalError::malformed("unquote-splicing", "expected one expression"))??;
-        let spliced = eval(expr, env.clone())?;
-        let tail_expanded = qq_expand(&tail, env)?;
-        return append_lists(spliced, tail_expanded);
+        if depth == 1 {
+            let mut iter = ListIter::new(h_tail);
+            let expr = iter.next().ok_or_else(|| {
+                EvalError::malformed("unquote-splicing", "expected one expression")
+            })??;
+            let spliced = eval(expr, env.clone())?;
+            let tail_expanded = qq_expand(&tail, env, depth)?;
+            return append_lists(spliced, tail_expanded);
+        }
+        // Nested unquote-splicing: emit literal, recurse with depth-1.
+        let inner = qq_expand(&h_tail, env, depth - 1)?;
+        let head_lit = Value::cons(h_head, inner);
+        let tail_expanded = qq_expand(&tail, env, depth)?;
+        return Ok(Value::cons(head_lit, tail_expanded));
     }
-    let head_expanded = qq_expand(&head, env)?;
-    let tail_expanded = qq_expand(&tail, env)?;
+    let head_expanded = qq_expand(&head, env, depth)?;
+    let tail_expanded = qq_expand(&tail, env, depth)?;
     Ok(Value::cons(head_expanded, tail_expanded))
 }
 
