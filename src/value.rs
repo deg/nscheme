@@ -63,6 +63,14 @@ pub enum RuntimeError {
     #[error("integer overflow in `{op}`")]
     Overflow { op: &'static str },
 
+    /// Tagged file I/O error so `file-error?` predicates can catch it.
+    #[error("file error: {0}")]
+    FileError(String),
+
+    /// Tagged read/parser error so `read-error?` predicates can catch it.
+    #[error("read error: {0}")]
+    ReadError(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -198,6 +206,29 @@ pub enum Procedure {
         env: EnvRef,
         name: Option<String>,
     },
+    /// R7RS §5.5 record constructor: applies its args to the given
+    /// field indices in declaration order; other fields default to
+    /// `Value::Unspecified`.
+    RecordConstructor {
+        type_id: Rc<RecordTypeId>,
+        field_count: usize,
+        ctor_field_indices: Vec<usize>,
+    },
+    /// R7RS §5.5 record predicate: `#t` iff the argument is a Record
+    /// whose `type_id` is this one.
+    RecordPredicate { type_id: Rc<RecordTypeId> },
+    /// R7RS §5.5 record accessor: returns the given field of a record
+    /// of the matching type.
+    RecordAccessor {
+        type_id: Rc<RecordTypeId>,
+        field_index: usize,
+    },
+    /// R7RS §5.5 record mutator: sets the given field of a record of
+    /// the matching type.
+    RecordMutator {
+        type_id: Rc<RecordTypeId>,
+        field_index: usize,
+    },
 }
 
 /// One arity-arm of a `case-lambda` procedure.
@@ -222,6 +253,10 @@ impl Procedure {
             Self::Continuation { .. } => "continuation",
             Self::Parameter { .. } => "parameter",
             Self::CaseLambda { name, .. } => name.as_deref().unwrap_or("case-lambda"),
+            Self::RecordConstructor { type_id, .. }
+            | Self::RecordPredicate { type_id, .. }
+            | Self::RecordAccessor { type_id, .. }
+            | Self::RecordMutator { type_id, .. } => &type_id.name,
         }
     }
 }
@@ -252,6 +287,30 @@ impl fmt::Debug for Procedure {
                 .field("name", name)
                 .field("clauses", &clauses.len())
                 .finish_non_exhaustive(),
+            Self::RecordConstructor { type_id, .. } => f
+                .debug_struct("RecordConstructor")
+                .field("type", &type_id.name)
+                .finish_non_exhaustive(),
+            Self::RecordPredicate { type_id } => f
+                .debug_struct("RecordPredicate")
+                .field("type", &type_id.name)
+                .finish(),
+            Self::RecordAccessor {
+                type_id,
+                field_index,
+            } => f
+                .debug_struct("RecordAccessor")
+                .field("type", &type_id.name)
+                .field("field", field_index)
+                .finish(),
+            Self::RecordMutator {
+                type_id,
+                field_index,
+            } => f
+                .debug_struct("RecordMutator")
+                .field("type", &type_id.name)
+                .field("field", field_index)
+                .finish(),
         }
     }
 }
@@ -400,6 +459,21 @@ pub enum Value {
     /// `let-values` family. R7RS's `(values v)` collapses to just `v`,
     /// so a singleton packet is never observed.
     Values(Rc<Vec<Value>>),
+    /// An R7RS record (§5.5). The `type_id` is shared between the
+    /// record value and the predicate/accessor/mutator procedures
+    /// produced by `define-record-type`. Each field is in its own
+    /// `RefCell` so individual mutators can update independently.
+    Record {
+        type_id: Rc<RecordTypeId>,
+        fields: Rc<Vec<RefCell<Value>>>,
+    },
+}
+
+/// Identity marker for a record type. Two records share a type iff
+/// their `type_id` `Rc`s are `Rc::ptr_eq`.
+#[derive(Debug)]
+pub struct RecordTypeId {
+    pub name: String,
 }
 
 /// State of a [`Value::Promise`]. Pending promises remember their
@@ -564,6 +638,7 @@ impl Value {
             Self::ErrorObject(_) => "error-object",
             Self::Promise(_) => "promise",
             Self::Values(_) => "values-packet",
+            Self::Record { .. } => "record",
         }
     }
 }
@@ -600,6 +675,7 @@ pub fn eq(a: &Value, b: &Value) -> bool {
         (Value::ErrorObject(x), Value::ErrorObject(y)) => Rc::ptr_eq(x, y),
         (Value::Promise(x), Value::Promise(y)) => Rc::ptr_eq(x, y),
         (Value::Values(x), Value::Values(y)) => Rc::ptr_eq(x, y),
+        (Value::Record { fields: fx, .. }, Value::Record { fields: fy, .. }) => Rc::ptr_eq(fx, fy),
         _ => false,
     }
 }
@@ -717,7 +793,22 @@ fn write_value(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt::Res
                 write_char_literal(*c, f)
             }
         }
-        Value::Symbol(s) => f.write_str(s.name()),
+        Value::Symbol(s) => {
+            // R7RS write must produce a representation that the
+            // reader can parse back. For symbols whose name looks
+            // like a number (`+inf.0`), contains forbidden
+            // characters (spaces, `|`, `\\`, `"`, `;`, parens), or
+            // is empty, wrap in `|…|` with escapes.
+            // `display` (the non-debug path) doesn't need round-trip
+            // preservation; we still write the bare name for
+            // `display`.
+            let name = s.name();
+            if display || !symbol_needs_pipes(name) {
+                f.write_str(name)
+            } else {
+                write_pipe_quoted_symbol(name, f)
+            }
+        }
         Value::Int(n) => write!(f, "{n}"),
         Value::BigInt(b) => write!(f, "{b}"),
         Value::Rational(r) => {
@@ -773,7 +864,122 @@ fn write_value(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt::Res
             }
             f.write_str(">")
         }
+        Value::Record { type_id, fields } => {
+            write!(f, "#<{}", type_id.name)?;
+            for field in fields.iter() {
+                write!(f, " {:?}", field.borrow())?;
+            }
+            f.write_str(">")
+        }
     }
+}
+
+/// Does this symbol name need `|…|` quoting for round-trip
+/// preservation under R7RS write?
+fn symbol_needs_pipes(name: &str) -> bool {
+    if name.is_empty() {
+        return true;
+    }
+    // Forbidden chars in unquoted identifiers (R7RS §7.1.1):
+    // whitespace, `|`, `\`, `"`, `;`, parens, `#`, `'`, `,`, `` ` ``.
+    if name.chars().any(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '|' | '\\' | '"' | ';' | '(' | ')' | '#' | '\'' | ',' | '`' | '[' | ']' | '{' | '}'
+            )
+    }) {
+        return true;
+    }
+    // If it looks like a number, we'd parse it back as one.
+    if looks_numeric(name) {
+        return true;
+    }
+    // Otherwise check the identifier grammar.
+    !is_plain_identifier(name)
+}
+
+fn looks_numeric(s: &str) -> bool {
+    // Approximations: starts with digit; OR sign-then-digit/dot;
+    // OR `+inf.0`/`-inf.0`/`+nan.0`/`-nan.0` (any case).
+    let lower = s.to_ascii_lowercase();
+    if matches!(lower.as_str(), "+inf.0" | "-inf.0" | "+nan.0" | "-nan.0") {
+        return true;
+    }
+    let bytes = s.as_bytes();
+    let first = bytes[0];
+    if first.is_ascii_digit() {
+        return true;
+    }
+    if matches!(first, b'+' | b'-' | b'.') && bytes.len() >= 2 {
+        let next = bytes[1];
+        if next.is_ascii_digit() || next == b'.' {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_plain_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    let initial_ok = first.is_ascii_alphabetic()
+        || matches!(
+            first,
+            '!' | '$' | '%' | '&' | '*' | '/' | ':' | '<' | '=' | '>' | '?' | '^' | '_' | '~'
+        );
+    // Peculiar identifiers: `+`, `-`, `...`, `->...`
+    if !initial_ok {
+        if s == "+" || s == "-" || s == "..." {
+            return true;
+        }
+        if (first == '+' || first == '-') && s.len() >= 2 {
+            // `->foo` and similar
+            let next = s.chars().nth(1).unwrap();
+            if next == '>' || next.is_ascii_alphabetic() {
+                return chars.all(is_subsequent);
+            }
+            return false;
+        }
+        return false;
+    }
+    chars.all(is_subsequent)
+}
+
+fn is_subsequent(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '!' | '$'
+                | '%'
+                | '&'
+                | '*'
+                | '/'
+                | ':'
+                | '<'
+                | '='
+                | '>'
+                | '?'
+                | '^'
+                | '_'
+                | '~'
+                | '+'
+                | '-'
+                | '.'
+                | '@'
+        )
+}
+
+fn write_pipe_quoted_symbol(name: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str("|")?;
+    for c in name.chars() {
+        match c {
+            '|' => f.write_str("\\|")?,
+            '\\' => f.write_str("\\\\")?,
+            c => f.write_str(&c.to_string())?,
+        }
+    }
+    f.write_str("|")
 }
 
 fn write_char_literal(c: char, f: &mut fmt::Formatter<'_>) -> fmt::Result {

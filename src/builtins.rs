@@ -330,6 +330,63 @@ fn install_arithmetic(env: &EnvRef) {
         // R7RS remainder: same sign as dividend.
         Ok(bigint_to_value(a % b))
     });
+    define(env, "truncate-quotient", Arity::Exact(2), |args| {
+        let a = value_to_bigint(&args[0])?;
+        let b = value_to_bigint(&args[1])?;
+        if b.is_zero() {
+            return Err(RuntimeError::DivisionByZero);
+        }
+        Ok(bigint_to_value(a / b))
+    });
+    define(env, "truncate-remainder", Arity::Exact(2), |args| {
+        let a = value_to_bigint(&args[0])?;
+        let b = value_to_bigint(&args[1])?;
+        if b.is_zero() {
+            return Err(RuntimeError::DivisionByZero);
+        }
+        Ok(bigint_to_value(a % b))
+    });
+    define(env, "truncate/", Arity::Exact(2), |args| {
+        let a = value_to_bigint(&args[0])?;
+        let b = value_to_bigint(&args[1])?;
+        if b.is_zero() {
+            return Err(RuntimeError::DivisionByZero);
+        }
+        Ok(Value::Values(Rc::new(vec![
+            bigint_to_value(&a / &b),
+            bigint_to_value(a % b),
+        ])))
+    });
+    define(env, "floor-quotient", Arity::Exact(2), |args| {
+        use num_integer::Integer;
+        let a = value_to_bigint(&args[0])?;
+        let b = value_to_bigint(&args[1])?;
+        if b.is_zero() {
+            return Err(RuntimeError::DivisionByZero);
+        }
+        Ok(bigint_to_value(a.div_floor(&b)))
+    });
+    define(env, "floor-remainder", Arity::Exact(2), |args| {
+        use num_integer::Integer;
+        let a = value_to_bigint(&args[0])?;
+        let b = value_to_bigint(&args[1])?;
+        if b.is_zero() {
+            return Err(RuntimeError::DivisionByZero);
+        }
+        Ok(bigint_to_value(a.mod_floor(&b)))
+    });
+    define(env, "floor/", Arity::Exact(2), |args| {
+        use num_integer::Integer;
+        let a = value_to_bigint(&args[0])?;
+        let b = value_to_bigint(&args[1])?;
+        if b.is_zero() {
+            return Err(RuntimeError::DivisionByZero);
+        }
+        Ok(Value::Values(Rc::new(vec![
+            bigint_to_value(a.div_floor(&b)),
+            bigint_to_value(a.mod_floor(&b)),
+        ])))
+    });
     define(env, "modulo", Arity::Exact(2), |args| {
         let a = value_to_bigint(&args[0])?;
         let b = value_to_bigint(&args[1])?;
@@ -1005,6 +1062,48 @@ fn install_misc(env: &EnvRef) {
             expected: "rational".into(),
             got: other.type_name().into(),
         }),
+    });
+    // R7RS rationalize: best rational approximation within tolerance.
+    // For v1 we punt: return the input as-is.
+    define(env, "rationalize", Arity::Exact(2), |a| Ok(a[0].clone()));
+    // Complex-number ops: nscheme v1 doesn't have complex, so these
+    // operate on reals as if they were complex with imag=0.
+    define(env, "magnitude", Arity::Exact(1), |a| match &a[0] {
+        Value::Float(f) => Ok(Value::Float(f.abs())),
+        Value::Int(n) => Ok(Value::Int(n.checked_abs().unwrap_or(i64::MAX))),
+        Value::BigInt(b) => Ok(bigint_to_value(b.as_ref().clone().abs())),
+        Value::Rational(r) => Ok(rational_to_value(r.as_ref().clone().abs())),
+        other => Err(RuntimeError::Type {
+            expected: "number".into(),
+            got: other.type_name().into(),
+        }),
+    });
+    define(env, "angle", Arity::Exact(1), |a| {
+        let n = Num::from_value(&a[0])?;
+        let f = n.to_f64();
+        Ok(Value::Float(if f.is_sign_negative() {
+            std::f64::consts::PI
+        } else {
+            0.0
+        }))
+    });
+    define(env, "real-part", Arity::Exact(1), |a| {
+        if !a[0].is_number() {
+            return Err(RuntimeError::Type {
+                expected: "number".into(),
+                got: a[0].type_name().into(),
+            });
+        }
+        Ok(a[0].clone())
+    });
+    define(env, "imag-part", Arity::Exact(1), |a| {
+        if !a[0].is_number() {
+            return Err(RuntimeError::Type {
+                expected: "number".into(),
+                got: a[0].type_name().into(),
+            });
+        }
+        Ok(Value::Int(0))
     });
     define(env, "features", Arity::Exact(0), |_| {
         Ok(Value::list_from(
@@ -2288,6 +2387,23 @@ const BOOTSTRAP: &str = r"
 (define (error msg . irritants)
   (raise (apply make-error-object msg irritants)))
 
+;; R7RS member/assoc support an optional 3rd-arg equality predicate.
+;; The primitive versions (defined in Rust) handle the 2-arg case
+;; with equal?. Override here in Scheme for the variadic shape.
+(define (member obj list . maybe-compare)
+  (let ((cmp (if (null? maybe-compare) equal? (car maybe-compare))))
+    (let loop ((xs list))
+      (cond ((null? xs) #f)
+            ((cmp obj (car xs)) xs)
+            (else (loop (cdr xs)))))))
+
+(define (assoc obj alist . maybe-compare)
+  (let ((cmp (if (null? maybe-compare) equal? (car maybe-compare))))
+    (let loop ((xs alist))
+      (cond ((null? xs) #f)
+            ((and (pair? (car xs)) (cmp obj (caar xs))) (car xs))
+            (else (loop (cdr xs)))))))
+
 ;; (call-with-values producer consumer) — calls (producer), then
 ;; applies consumer to whatever values producer returned. The producer
 ;; may use `values` to return zero, one, or many values; values->list
@@ -2389,10 +2505,17 @@ mod tests {
 
     #[test]
     fn division_by_zero_errors() {
-        assert!(matches!(
-            run("(/ 1 0)"),
-            Err(EvalError::Runtime(RuntimeError::DivisionByZero))
-        ));
+        // R7RS §6.11 conditions: errors from primitives raise so
+        // (with-exception-handler …) / (guard …) can catch them.
+        // An uncaught raise surfaces as EvalError::Raised carrying
+        // an error-object.
+        let err = run("(/ 1 0)").unwrap_err();
+        match err {
+            EvalError::Raised(Value::ErrorObject(e)) => {
+                assert!(e.message.contains("division by zero"));
+            }
+            other => panic!("expected EvalError::Raised, got {other:?}"),
+        }
     }
 
     #[test]

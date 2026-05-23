@@ -223,7 +223,7 @@ pub fn install_io(env: &EnvRef) {
         Value::String(path) => {
             let p = path.borrow().clone();
             let content = fs::read_to_string(&p)
-                .map_err(|e| RuntimeError::Other(format!("open-input-file({p}): {e}")))?;
+                .map_err(|e| RuntimeError::FileError(format!("open-input-file({p}): {e}")))?;
             Ok(Value::Port(Rc::new(RefCell::new(Port::FileInput {
                 content,
                 pos: 0,
@@ -382,17 +382,97 @@ pub fn install_io(env: &EnvRef) {
     define_prim(env, "newline", Arity::Range { min: 0, max: 1 }, |a| {
         write_to_port(a.first(), "\n")
     });
+    define_prim(
+        env,
+        "flush-output-port",
+        Arity::Range { min: 0, max: 1 },
+        |_| {
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            Ok(Value::Unspecified)
+        },
+    );
+    define_prim(
+        env,
+        "read-bytevector!",
+        Arity::Range { min: 1, max: 4 },
+        |a| {
+            // (read-bytevector! bv [port [start [end]]])
+            let Value::Bytevector(dest) = &a[0] else {
+                return Err(type_err("bytevector", &a[0]));
+            };
+            let port_v = a.get(1);
+            let Some(Value::Port(p)) = port_v else {
+                return Err(RuntimeError::Other(
+                    "read-bytevector! requires an input port".into(),
+                ));
+            };
+            let mut port = p.borrow_mut();
+            let dest_len = dest.borrow().len();
+            let start = if a.len() > 2 {
+                value_to_usize(&a[2], "read-bytevector!")?
+            } else {
+                0
+            };
+            let end = if a.len() > 3 {
+                value_to_usize(&a[3], "read-bytevector!")?
+            } else {
+                dest_len
+            };
+            if end > dest_len || start > end {
+                return Err(RuntimeError::Other(
+                    "read-bytevector!: indices out of range".into(),
+                ));
+            }
+            match &mut *port {
+                Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => {
+                    let bytes = content.as_bytes();
+                    if *pos >= bytes.len() {
+                        return Ok(Value::Eof);
+                    }
+                    let want = end - start;
+                    let take = (bytes.len() - *pos).min(want);
+                    let mut d = dest.borrow_mut();
+                    d[start..start + take].copy_from_slice(&bytes[*pos..*pos + take]);
+                    *pos += take;
+                    #[allow(clippy::cast_possible_wrap)]
+                    Ok(Value::Int(take as i64))
+                }
+                _ => Err(RuntimeError::Other(
+                    "read-bytevector!: not an input port".into(),
+                )),
+            }
+        },
+    );
     define_prim(env, "write-char", Arity::Range { min: 1, max: 2 }, |a| {
         let Value::Char(c) = a[0] else {
             return Err(type_err("char", &a[0]));
         };
         write_to_port(a.get(1), &c.to_string())
     });
-    define_prim(env, "write-string", Arity::Range { min: 1, max: 2 }, |a| {
+    define_prim(env, "write-string", Arity::Range { min: 1, max: 4 }, |a| {
         let Value::String(s) = &a[0] else {
             return Err(type_err("string", &a[0]));
         };
-        write_to_port(a.get(1), &s.borrow())
+        let s_borrowed = s.borrow();
+        let chars: Vec<char> = s_borrowed.chars().collect();
+        let start = if a.len() > 2 {
+            value_to_usize(&a[2], "write-string")?
+        } else {
+            0
+        };
+        let end = if a.len() > 3 {
+            value_to_usize(&a[3], "write-string")?
+        } else {
+            chars.len()
+        };
+        if end > chars.len() || start > end {
+            return Err(RuntimeError::Other(
+                "write-string: bounds out of range".into(),
+            ));
+        }
+        let slice: String = chars[start..end].iter().collect();
+        write_to_port(a.get(1), &slice)
     });
 
     // -- file utilities --------------------------------------------
@@ -405,7 +485,7 @@ pub fn install_io(env: &EnvRef) {
         Value::String(path) => {
             let p = path.borrow().clone();
             fs::remove_file(&p)
-                .map_err(|e| RuntimeError::Other(format!("delete-file({p}): {e}")))?;
+                .map_err(|e| RuntimeError::FileError(format!("delete-file({p}): {e}")))?;
             Ok(Value::Unspecified)
         }
         other => Err(type_err("string", other)),
@@ -470,7 +550,7 @@ fn read_datum_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
         Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => {
             let rest = &content[*pos..];
             let (datum, consumed) = crate::parse::parse_one_with_consumed(rest)
-                .map_err(|e| RuntimeError::Other(format!("read: {e}")))?;
+                .map_err(|e| RuntimeError::ReadError(format!("read: {e}")))?;
             *pos += consumed;
             Ok(datum.unwrap_or(Value::Eof))
         }

@@ -46,7 +46,25 @@ use thiserror::Error;
 
 use crate::env::{Env, EnvRef};
 use crate::parse::{ParseError, parse_program};
-use crate::value::{Pair, Procedure, RuntimeError, Symbol, Value};
+use crate::value::{ErrorKind, ErrorObject, Pair, Procedure, RuntimeError, Symbol, Value};
+
+/// Convert a [`RuntimeError`] (raised by a primitive) into a Scheme
+/// error-object Value, so it can flow through the R7RS exception
+/// mechanism (with-exception-handler / guard). The error kind is
+/// preserved so `file-error?` and `read-error?` work on the
+/// resulting value.
+fn runtime_error_to_value(e: RuntimeError) -> Value {
+    let kind = match &e {
+        RuntimeError::FileError(_) => ErrorKind::File,
+        RuntimeError::ReadError(_) => ErrorKind::Read,
+        _ => ErrorKind::User,
+    };
+    Value::ErrorObject(Rc::new(ErrorObject {
+        message: format!("{e}"),
+        irritants: Vec::new(),
+        kind,
+    }))
+}
 
 /// Errors raised during evaluation. Wraps [`RuntimeError`] (primitive /
 /// lookup failures) and [`ParseError`] for convenience APIs that go
@@ -296,7 +314,8 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
         | Value::Macro(_)
         | Value::ErrorObject(_)
         | Value::Promise(_)
-        | Value::Values(_) => return Ok(Step::Return(expr)),
+        | Value::Values(_)
+        | Value::Record { .. } => return Ok(Step::Return(expr)),
         Value::Symbol(sym) => {
             let v = env.lookup(sym).ok_or_else(|| {
                 EvalError::Runtime(RuntimeError::Undefined(sym.name().to_string()))
@@ -348,6 +367,7 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
             "delay" | "delay-force" | "lazy" => return step_delay(tail, env),
             "case-lambda" => return step_case_lambda(tail, env),
             "define-values" => return step_define_values(tail, env),
+            "define-record-type" => return step_define_record_type(tail, env),
             "eval" => return step_eval_form(tail, env, frames),
             "let-values" => return step_let_values(tail, env, frames, false),
             "let*-values" => return step_let_values(tail, env, frames, true),
@@ -701,6 +721,158 @@ fn step_let_values(
     }
     let _ = frames;
     Ok(Step::Eval(acc, env))
+}
+
+/// `(define-record-type NAME (CTOR ARG-FIELDS...) PRED FIELD-SPECS...)`
+/// — R7RS §5.5. Defines five-ish bindings:
+///   - `CTOR`: constructor; takes the arg-fields in order, returns a fresh record.
+///   - `PRED`: type predicate.
+///   - one accessor (and optionally one mutator) per `FIELD-SPEC`.
+fn step_define_record_type(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
+    let parts = collect_list(&tail)
+        .map_err(|()| EvalError::malformed("define-record-type", "expected proper list"))?;
+    if parts.len() < 3 {
+        return Err(EvalError::malformed(
+            "define-record-type",
+            "expected name, constructor spec, predicate, and fields",
+        ));
+    }
+    // Name
+    let Value::Symbol(type_name) = parts[0].clone() else {
+        return Err(EvalError::malformed(
+            "define-record-type",
+            "record type name must be a symbol",
+        ));
+    };
+    // Constructor spec: (ctor-name arg-fields...)
+    let ctor_parts = collect_list(&parts[1]).map_err(|()| {
+        EvalError::malformed("define-record-type", "constructor spec must be a list")
+    })?;
+    if ctor_parts.is_empty() {
+        return Err(EvalError::malformed(
+            "define-record-type",
+            "constructor spec must include a name",
+        ));
+    }
+    let Value::Symbol(ctor_name) = ctor_parts[0].clone() else {
+        return Err(EvalError::malformed(
+            "define-record-type",
+            "constructor name must be a symbol",
+        ));
+    };
+    let ctor_args: Vec<Symbol> = ctor_parts[1..]
+        .iter()
+        .map(|v| match v {
+            Value::Symbol(s) => Ok(s.clone()),
+            _ => Err(EvalError::malformed(
+                "define-record-type",
+                "constructor field name must be a symbol",
+            )),
+        })
+        .collect::<Result<_, _>>()?;
+    // Predicate name
+    let Value::Symbol(pred_name) = parts[2].clone() else {
+        return Err(EvalError::malformed(
+            "define-record-type",
+            "predicate name must be a symbol",
+        ));
+    };
+    // Field specs
+    let mut all_fields: Vec<Symbol> = Vec::new();
+    let mut accessors: Vec<(Symbol, Symbol)> = Vec::new();
+    let mut mutators: Vec<(Symbol, Symbol)> = Vec::new();
+    for spec in &parts[3..] {
+        let s = collect_list(spec).map_err(|()| {
+            EvalError::malformed("define-record-type", "field spec must be a list")
+        })?;
+        if s.len() < 2 || s.len() > 3 {
+            return Err(EvalError::malformed(
+                "define-record-type",
+                "field spec must be (name accessor) or (name accessor mutator)",
+            ));
+        }
+        let Value::Symbol(field_name) = s[0].clone() else {
+            return Err(EvalError::malformed(
+                "define-record-type",
+                "field name must be a symbol",
+            ));
+        };
+        let Value::Symbol(acc_name) = s[1].clone() else {
+            return Err(EvalError::malformed(
+                "define-record-type",
+                "accessor name must be a symbol",
+            ));
+        };
+        all_fields.push(field_name.clone());
+        accessors.push((field_name.clone(), acc_name));
+        if let Some(mut_form) = s.get(2) {
+            let Value::Symbol(mut_name) = mut_form.clone() else {
+                return Err(EvalError::malformed(
+                    "define-record-type",
+                    "mutator name must be a symbol",
+                ));
+            };
+            mutators.push((field_name, mut_name));
+        }
+    }
+
+    // Resolve constructor args to field indices.
+    let ctor_field_indices: Vec<usize> = ctor_args
+        .iter()
+        .map(|arg| {
+            all_fields.iter().position(|f| f == arg).ok_or_else(|| {
+                EvalError::malformed(
+                    "define-record-type",
+                    format!("constructor field `{}` not declared", arg.name()),
+                )
+            })
+        })
+        .collect::<Result<_, _>>()?;
+
+    let type_id = Rc::new(crate::value::RecordTypeId {
+        name: type_name.name().to_string(),
+    });
+    let field_count = all_fields.len();
+
+    // Constructor
+    env.define(
+        ctor_name,
+        Value::Procedure(Rc::new(Procedure::RecordConstructor {
+            type_id: type_id.clone(),
+            field_count,
+            ctor_field_indices,
+        })),
+    );
+    // Predicate
+    env.define(
+        pred_name,
+        Value::Procedure(Rc::new(Procedure::RecordPredicate {
+            type_id: type_id.clone(),
+        })),
+    );
+    // Accessors
+    for (field_name, acc_name) in accessors {
+        let idx = all_fields.iter().position(|f| f == &field_name).unwrap();
+        env.define(
+            acc_name,
+            Value::Procedure(Rc::new(Procedure::RecordAccessor {
+                type_id: type_id.clone(),
+                field_index: idx,
+            })),
+        );
+    }
+    // Mutators
+    for (field_name, mut_name) in mutators {
+        let idx = all_fields.iter().position(|f| f == &field_name).unwrap();
+        env.define(
+            mut_name,
+            Value::Procedure(Rc::new(Procedure::RecordMutator {
+                type_id: type_id.clone(),
+                field_index: idx,
+            })),
+        );
+    }
+    Ok(Step::Return(Value::Unspecified))
 }
 
 /// `(eval datum env-spec)` — evaluate `datum` in the env identified
@@ -1870,14 +2042,23 @@ fn step_apply(
     match &*proc_rc {
         Procedure::Primitive { name, arity, body } => {
             if !arity.matches(args.len()) {
-                return Err(EvalError::Runtime(RuntimeError::Arity {
+                // Arity errors are R7RS conditions too — raise so
+                // handlers can catch.
+                let err = RuntimeError::Arity {
                     procedure: (*name).to_string(),
                     expected: format!("{arity}"),
                     got: args.len(),
-                }));
+                };
+                return Ok(Step::Raise(runtime_error_to_value(err), false));
             }
-            let result = body(&args).map_err(EvalError::Runtime)?;
-            Ok(Step::Return(result))
+            match body(&args) {
+                Ok(v) => Ok(Step::Return(v)),
+                // R7RS §6.11: any "error" from a primitive should be
+                // catchable by with-exception-handler / guard. Convert
+                // the RuntimeError into an error-object value and
+                // raise it.
+                Err(e) => Ok(Step::Raise(runtime_error_to_value(e), false)),
+            }
         }
         Procedure::Closure {
             params,
@@ -1953,6 +2134,95 @@ fn step_apply(
                 expected: "any matching clause".into(),
                 got: provided,
             }))
+        }
+        Procedure::RecordConstructor {
+            type_id,
+            field_count,
+            ctor_field_indices,
+        } => {
+            if args.len() != ctor_field_indices.len() {
+                return Err(EvalError::Runtime(RuntimeError::Arity {
+                    procedure: format!("{}-constructor", type_id.name),
+                    expected: format!("exactly {}", ctor_field_indices.len()),
+                    got: args.len(),
+                }));
+            }
+            // Initialize all fields to Unspecified, then place each
+            // arg at its mapped field index.
+            let fields: Vec<std::cell::RefCell<Value>> = (0..*field_count)
+                .map(|_| std::cell::RefCell::new(Value::Unspecified))
+                .collect();
+            for (arg, &idx) in args.into_iter().zip(ctor_field_indices.iter()) {
+                *fields[idx].borrow_mut() = arg;
+            }
+            Ok(Step::Return(Value::Record {
+                type_id: type_id.clone(),
+                fields: Rc::new(fields),
+            }))
+        }
+        Procedure::RecordPredicate { type_id } => {
+            if args.len() != 1 {
+                return Err(EvalError::Runtime(RuntimeError::Arity {
+                    procedure: format!("{}?", type_id.name),
+                    expected: "exactly 1".into(),
+                    got: args.len(),
+                }));
+            }
+            let matches_type = matches!(
+                &args[0],
+                Value::Record { type_id: tid, .. } if Rc::ptr_eq(tid, type_id)
+            );
+            Ok(Step::Return(Value::Bool(matches_type)))
+        }
+        Procedure::RecordAccessor {
+            type_id,
+            field_index,
+        } => {
+            if args.len() != 1 {
+                return Err(EvalError::Runtime(RuntimeError::Arity {
+                    procedure: format!("{}-accessor", type_id.name),
+                    expected: "exactly 1".into(),
+                    got: args.len(),
+                }));
+            }
+            match &args[0] {
+                Value::Record {
+                    type_id: tid,
+                    fields,
+                } if Rc::ptr_eq(tid, type_id) => {
+                    Ok(Step::Return(fields[*field_index].borrow().clone()))
+                }
+                other => Err(EvalError::Runtime(RuntimeError::Type {
+                    expected: format!("record of type {}", type_id.name),
+                    got: other.type_name().into(),
+                })),
+            }
+        }
+        Procedure::RecordMutator {
+            type_id,
+            field_index,
+        } => {
+            if args.len() != 2 {
+                return Err(EvalError::Runtime(RuntimeError::Arity {
+                    procedure: format!("{}-mutator", type_id.name),
+                    expected: "exactly 2".into(),
+                    got: args.len(),
+                }));
+            }
+            let new_val = args[1].clone();
+            match &args[0] {
+                Value::Record {
+                    type_id: tid,
+                    fields,
+                } if Rc::ptr_eq(tid, type_id) => {
+                    *fields[*field_index].borrow_mut() = new_val;
+                    Ok(Step::Return(Value::Unspecified))
+                }
+                other => Err(EvalError::Runtime(RuntimeError::Type {
+                    expected: format!("record of type {}", type_id.name),
+                    got: other.type_name().into(),
+                })),
+            }
         }
         Procedure::Parameter { cell } => {
             // R7RS: (param) returns the current value; (param new)

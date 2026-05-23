@@ -12,6 +12,7 @@
 
 (define-library (chibi test)
   (export test-begin test-end test test-assert test-error test-read-error
+          test-values
           $passes $fails $failures $section)
   (import (scheme base))
   (begin
@@ -31,6 +32,9 @@
 
     ;; Each macro expands to inline guard + set!, so the
     ;; mutations target the call-site $passes / $fails.
+
+    ;; chibi's (chibi test) allows an optional label as the first
+    ;; arg to test / test-assert / test-error. We accept either form.
 
     (define-syntax test
       (syntax-rules ()
@@ -52,7 +56,9 @@
                    (cons (list 'mismatch 'expr
                                'expected expected-val
                                'got (cdr outcome))
-                         $failures))))))))
+                         $failures))))))
+        ((_ label expected expr)
+         (test expected expr))))
 
     (define-syntax test-assert
       (syntax-rules ()
@@ -65,7 +71,8 @@
             ((cdr outcome)
              (set! $passes (+ $passes 1)))
             (else
-             (set! $fails (+ $fails 1))))))))
+             (set! $fails (+ $fails 1))))))
+        ((_ label expr) (test-assert expr))))
 
     (define-syntax test-error
       (syntax-rules ()
@@ -74,9 +81,35 @@
                           (cons 'ok expr))))
            (if (eq? (car outcome) 'err)
                (set! $passes (+ $passes 1))
-               (set! $fails (+ $fails 1)))))))
+               (set! $fails (+ $fails 1)))))
+        ((_ label expr) (test-error expr))))
 
     (define-syntax test-read-error
       (syntax-rules ()
         ((_ src) (test-error (read (open-input-string src))))))
+
+    ;; test-values: like `test` but the producer returns multiple
+    ;; values that should equal the values produced by the expected
+    ;; expression. We compare via values->list (so single values
+    ;; and packets compare uniformly).
+    (define-syntax test-values
+      (syntax-rules ()
+        ((_ expected expr)
+         (let ((got (guard (e (else (cons 'err e)))
+                      (cons 'ok (values->list expr))))
+               (want (values->list expected)))
+           (cond
+            ((eq? (car got) 'err)
+             (set! $fails (+ $fails 1))
+             (set! $failures
+                   (cons (list 'raised 'expr (cdr got)) $failures)))
+            ((equal? (cdr got) want)
+             (set! $passes (+ $passes 1)))
+            (else
+             (set! $fails (+ $fails 1))
+             (set! $failures
+                   (cons (list 'values-mismatch 'expr
+                               'expected want
+                               'got (cdr got))
+                         $failures))))))))
     ))
