@@ -294,29 +294,33 @@ Sample output:
 ```
 === chibi r7rs-tests.scm baseline ===
   total datums:     1180
-  evaluated:        1170
-  passes:           1017
-  failures:         83
-  top-level errors: 67
-  duration:         ~200ms
+  evaluated:        1180
+  passes:           1152
+  failures:         62
+  top-level errors: 2
+  duration:         ~190ms
 ```
 
-That's ~86% of the corpus's individual test assertions passing.
-The remaining failures and errors fall into a few buckets:
+That's ~98% of the corpus's individual test assertions passing.
+The remaining failures fall into a few buckets:
 
-- Complex numbers (`make-rectangular`, `magnitude` on `a+bi`, etc.)
-  are not implemented in v1.
-- Datum labels (`#0=` / `#0#` for circular reads) and the
-  `#!fold-case` directive aren't recognized by the reader.
-- A few R7RS corners depend on `dynamic-wind` firing on continuation
-  jumps (10 skipped forms; see ADR 0004).
-- A handful of failures are float-precision artifacts where chibi's
-  reference output uses 15 significant digits and Rust's default
-  `f64` formatting uses up to 17.
+- Macro hygiene corner cases: free identifiers in `syntax-rules`
+  templates use the call-site environment rather than the
+  definition site, so a few tests that depend on shadowing
+  `let` / `if` / `=>` inside a macro fail. Fixing this needs
+  syntactic closures or sets-of-scopes.
+- `dynamic-wind` is currently linear — `before` / `after` thunks
+  don't fire on `call/cc` re-entry / escape.
+- Exact-complex numbers: nscheme's complex slot is inexact-only,
+  so `(number->string 1+2i)` returns `"1.0+2.0i"` where chibi
+  returns `"1+2i"`.
+- Unicode case folding (`string-foldcase` on `Maß`, Greek final
+  sigma, etc.) — we approximate with `to_lowercase`.
+- A handful of float-precision artifacts where the chibi corpus
+  hard-codes 15-significant-digit float literals and our default
+  `f64` formatting prints up to 17.
 
-The `top-level errors` are mostly references to procedures nscheme
-v1 doesn't implement (see "Documented gaps" above). The
-`BASELINE_MIN_PASSES` constant in the test guards against
+The `BASELINE_MIN_PASSES` constant in the test guards against
 regressions — lowering it requires triage in
 [bead `nscheme-i0p`](.beads/issues.jsonl).
 

@@ -699,7 +699,10 @@ fn step_let_values(
         Value::list_from(begin)
     };
 
-    // Build nested call-with-values, innermost first.
+    // Build nested call-with-values, innermost first. Even with no
+    // bindings, R7RS demands a fresh scope for the body so internal
+    // defines don't leak — wrap in a no-arg thunk in that case.
+    let bindings_empty = bindings.is_empty();
     let mut acc = body_expr;
     for binding in bindings.into_iter().rev() {
         // Each binding is ((vars...) producer-expr)
@@ -719,6 +722,11 @@ fn step_let_values(
         let consumer = Value::list_from([mksym("lambda"), formals, acc]);
         // (call-with-values producer-thunk consumer)
         acc = Value::list_from([mksym("call-with-values"), producer_thunk, consumer]);
+    }
+    if bindings_empty {
+        // ((lambda () acc))
+        let thunk = Value::list_from([mksym("lambda"), Value::Null, acc]);
+        acc = Value::list_from([thunk]);
     }
     let _ = frames;
     Ok(Step::Eval(acc, env))

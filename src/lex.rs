@@ -461,7 +461,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Lex `#N=` (DatumLabel) or `#N#` (DatumRef).
+    /// Lex `#N=` (`DatumLabel`) or `#N#` (`DatumRef`).
     fn lex_datum_label(&mut self, start: usize) -> Result<Token, LexError> {
         let mut n: u64 = 0;
         while let Some(c) = self.peek_char() {

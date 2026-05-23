@@ -385,15 +385,17 @@ fn parse_number(num: &NumberLexeme, span: Span) -> Result<Value, ParseError> {
     // pair of f64) — exact complex would multiply the numeric tower
     // by N. Real-only inputs with imaginary part 0 collapse to a
     // real value so `(real? 3+0i)` is #t.
-    if (body.ends_with('i') || body.ends_with('I')) && radix == 10 {
-        if let Some(value) = parse_rectangular_complex(body, num, bad)? {
-            return Ok(value);
-        }
+    if (body.ends_with('i') || body.ends_with('I'))
+        && radix == 10
+        && let Some(value) = parse_rectangular_complex(body, num, bad)?
+    {
+        return Ok(value);
     }
-    if body.contains('@') && radix == 10 {
-        if let Some(value) = parse_polar_complex(body, num, bad)? {
-            return Ok(value);
-        }
+    if body.contains('@')
+        && radix == 10
+        && let Some(value) = parse_polar_complex(body, num, bad)?
+    {
+        return Ok(value);
     }
 
     // Exact rational: a/b.
@@ -566,7 +568,7 @@ fn real_str_to_value(
         return Ok(Value::Float(f));
     }
     // Pure integer.
-    if let Ok(n) = i64::from_str_radix(s, 10) {
+    if let Ok(n) = s.parse::<i64>() {
         if matches!(num.exactness, Exactness::Inexact) {
             #[allow(clippy::cast_precision_loss)]
             return Ok(Value::Float(n as f64));

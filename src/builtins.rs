@@ -170,9 +170,9 @@ fn complex_sqrt(re: f64, im: f64) -> (f64, f64) {
         }
         return (0.0, (-re).sqrt());
     }
-    let r = (re * re + im * im).sqrt();
-    let s = ((r + re) / 2.0).sqrt();
-    let t = ((r - re) / 2.0).sqrt();
+    let r = re.hypot(im);
+    let s = f64::midpoint(r, re).sqrt();
+    let t = f64::midpoint(r, -re).sqrt();
     if im >= 0.0 { (s, t) } else { (s, -t) }
 }
 
@@ -1144,6 +1144,9 @@ fn install_misc(env: &EnvRef) {
                 Ok(rational_to_value(r))
             }
             Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(a[0].clone()),
+            Value::Complex(_) => Err(RuntimeError::Other(
+                "exact: nscheme v1 has no exact-complex tower".into(),
+            )),
             other => Err(RuntimeError::Type {
                 expected: "number".into(),
                 got: other.type_name().into(),
@@ -1151,6 +1154,9 @@ fn install_misc(env: &EnvRef) {
         }
     });
     define(env, "inexact", Arity::Exact(1), |a| {
+        if let Value::Complex(_) = &a[0] {
+            return Ok(a[0].clone());
+        }
         let n = Num::from_value(&a[0])?;
         Ok(Value::Float(n.to_f64()))
     });
@@ -1633,8 +1639,9 @@ fn install_inexact(env: &EnvRef) {
                 if let Value::Int(n) = v
                     && *n >= 0
                 {
+                    #[allow(clippy::cast_precision_loss)]
                     let f = (*n as f64).sqrt();
-                    #[allow(clippy::cast_possible_truncation)]
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let i = f as i64;
                     if i * i == *n {
                         return Ok(Value::Int(i));

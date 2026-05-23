@@ -951,6 +951,7 @@ fn write_value(
     write_value_body(v, f, display, state)
 }
 
+#[allow(clippy::too_many_lines)]
 fn write_value_body(
     v: &Value,
     f: &mut fmt::Formatter<'_>,

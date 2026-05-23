@@ -60,7 +60,7 @@ fn chibi_baseline_inner() {
     // Pass-count floor. As nscheme grows toward full R7RS-small the
     // baseline should be ratcheted up. Lowering it requires
     // justification (regression triage in the failing bead).
-    const BASELINE_MIN_PASSES: i64 = 1020;
+    const BASELINE_MIN_PASSES: i64 = 1150;
 
     let env = Env::new_global();
     install_base(&env).expect("install_base");
