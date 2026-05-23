@@ -111,13 +111,18 @@ continuation captured in one form couldn't jump into another.
 
 - A captured continuation holds all the `Frame` storage indefinitely.
   For long-lived continuations that's a memory cost (no GC).
-- `dynamic-wind`'s before/after thunks are *not* automatically fired
-  on continuation jumps in/out of the protected region in v1. The
-  R7RS-correct version requires tracking active dynamic-wind chains
-  and walking them when a continuation re-enters. Documented as a v1
-  limitation.
+
+### Dynamic-wind interaction
+
+`dynamic-wind` *is* wired into continuation invocation (R7RS §6.10):
+the body thunk runs under a `Frame::DynamicWind { id, before, after }`
+marker, so the saved continuation captures which wind extents were
+active. When a continuation is invoked, the eval loop diffs the
+current wind chain against the saved one, finds the longest common
+prefix, and schedules `after` thunks (innermost first) and `before`
+thunks (outermost first) via a `Frame::WindJump` before installing
+the saved frames and returning the supplied value.
 
 ### Open follow-ups
 
-- Full `dynamic-wind` semantics on continuation invocation.
 - Delimited continuations (`shift`/`reset`) — not R7RS but useful.

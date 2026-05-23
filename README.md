@@ -235,7 +235,6 @@ Things explicitly out of scope for v1, with deeper detail in
 - Definition-site free-identifier capture in macros (the standard
   hygiene example with shadowed `+` returns the call-site `+`, not
   the macro's)
-- `dynamic-wind` before/after thunks firing on continuation jumps
 
 ## Design
 
@@ -295,8 +294,8 @@ Sample output:
 === chibi r7rs-tests.scm baseline ===
   total datums:     1180
   evaluated:        1180
-  passes:           1152
-  failures:         62
+  passes:           1153
+  failures:         61
   top-level errors: 2
   duration:         ~190ms
 ```
@@ -309,8 +308,6 @@ The remaining failures fall into a few buckets:
   definition site, so a few tests that depend on shadowing
   `let` / `if` / `=>` inside a macro fail. Fixing this needs
   syntactic closures or sets-of-scopes.
-- `dynamic-wind` is currently linear — `before` / `after` thunks
-  don't fire on `call/cc` re-entry / escape.
 - Exact-complex numbers: nscheme's complex slot is inexact-only,
   so `(number->string 1+2i)` returns `"1.0+2.0i"` where chibi
   returns `"1+2i"`.
