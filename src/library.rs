@@ -60,8 +60,8 @@ pub fn is_builtin_library(name: &LibraryName) -> bool {
             && matches!(
                 b.as_str(),
                 "base" | "write" | "read" | "char" | "file" | "inexact"
-                | "cxr" | "lazy" | "load" | "process-context" | "repl"
-                | "time" | "case-lambda" | "eval" | "r5rs"
+                | "complex" | "cxr" | "lazy" | "load" | "process-context"
+                | "repl" | "time" | "case-lambda" | "eval" | "r5rs"
             )
     )
 }

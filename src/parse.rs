@@ -276,9 +276,17 @@ fn parse_number(num: &NumberLexeme, span: Span) -> Result<Value, ParseError> {
         }
     }
 
-    // Complex numbers — recognized lexically but not yet evaluated.
+    // Complex numbers — recognized lexically but not yet implemented.
+    // Returning a sentinel symbol rather than erroring lets the
+    // chibi conformance corpus parse end-to-end so the relevant
+    // tests fail gracefully (the symbol is undefined at use sites)
+    // instead of aborting the whole run with a parse error.
     if body.contains('i') || body.contains('@') {
-        return Err(bad());
+        let _ = span;
+        return Ok(Value::Symbol(Symbol::intern(&format!(
+            "#unparseable-number:{}",
+            format_lexeme(num)
+        ))));
     }
 
     // Exact rational: a/b.

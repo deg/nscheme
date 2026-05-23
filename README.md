@@ -201,33 +201,131 @@ Currently working:
   (`cons`, `car`, `cdr`, `length`, `reverse`, `append`, `list-ref`,
   `member`/`assoc` families), `map`, `for-each`
 
-Not yet implemented (filed as `bd` issues):
+### Also implemented
 
-- Full numeric tower (bignums, exact rationals)
-- Rich string/char/vector/bytevector operations
-- I/O ports and `display`/`write`/`read`
-- `syntax-rules` macros
-- R7RS `define-library` modules
-- `call/cc` (architecturally ready — surface wiring TBD)
-- Exception handling (`raise`/`guard`)
+- Full numeric tower (`i64` / arbitrary-precision `BigInt` / exact
+  `BigRational` / `f64`) with R7RS exact/inexact promotion
+- String / char / symbol / vector / bytevector operations with
+  Unicode-aware string indexing
+- Textual ports (string and file), `display` / `write` / `read-char`,
+  `eof-object`
+- Hygienic `syntax-rules` (alpha-renaming) — `define-syntax`,
+  `let-syntax`, `letrec-syntax`
+- `define-library`, `import`, `cond-expand` (built-in `(scheme …)`
+  libraries are no-op imports)
+- `call/cc`, `call-with-current-continuation`, `dynamic-wind`, `apply`
+- Exception handling: `raise`, `raise-continuable`,
+  `with-exception-handler`, `guard`, error objects
+- `delay` / `force` / `make-promise`, lazy evaluation
+- `values` / `call-with-values` / `let-values` / `let*-values`
+- `make-parameter` / `parameterize` (without continuation-jump
+  semantics)
+
+### Documented gaps
+
+Things explicitly out of scope for v1, with deeper detail in
+[`docs/`](docs/) and the `bd` issue tracker:
+
+- Complex numbers (`make-rectangular`, etc.)
+- `eval` from Scheme code (the host evaluator exists but isn't
+  exposed as `(scheme eval)`'s `eval`)
+- `case-lambda`
+- `(scheme time)`, `(scheme process-context)` library bindings
+- Full datum `read` (we have `read-char`/`read-line` only)
+- Definition-site free-identifier capture in macros (the standard
+  hygiene example with shadowed `+` returns the call-site `+`, not
+  the macro's)
+- `dynamic-wind` before/after thunks firing on continuation jumps
 
 ## Design
 
-See [`docs/`](docs/) for architecture decision records. The most
-important one is `0001-tree-walking-interpreter.md` — it explains why
-the evaluator is a step-loop with continuation frames rather than a
-recursive `eval` function, and why that choice matters for TCO and
-future `call/cc`.
+See [`docs/`](docs/) for architecture decision records:
 
-## Development
+- 0001 — Tree-walking interpreter with explicit step-loop
+- 0002 — Numeric tower
+- 0003 — `syntax-rules` hygiene via alpha-renaming
+- 0004 — Continuations as cloned frame stacks
+- 0005 — Exception handling
+- 0006 — Library / module system
+
+ADR 0001 is the load-bearing one: it explains why the evaluator is a
+step-loop with continuation frames rather than recursive `eval`
+calls, and why that choice makes TCO and `call/cc` cheap.
+
+## Testing
+
+### Running all tests
 
 ```bash
-cargo test                          # Run all tests
-cargo clippy --all-targets -- -D warnings   # Lint
-cargo fmt                           # Format
-bd ready                            # See what's next on the backlog
+cargo test
+```
+
+That runs about **330 tests across 16 files** in a few seconds.
+The suite covers each module's unit tests plus end-to-end
+integration tests for evaluation, tail calls, special forms,
+the base library, I/O, macros, libraries, continuations,
+exceptions, lazy evaluation, multiple values, parameters,
+and an in-house R7RS conformance corpus.
+
+### Running specific tests
+
+```bash
+cargo test --test r7rs_conformance      # the in-house R7RS suite
+cargo test --test tail_calls            # tail-position regression suite
+cargo test --test syntax_rules          # macros
+cargo test --test continuations         # call/cc
+cargo test factorial                    # any test name matching "factorial"
+cargo test -- --nocapture               # show println! / eprintln! output
+```
+
+### Standard R7RS conformance corpus (chibi-scheme)
+
+`tests/r7rs_chibi.rs` runs chibi-scheme's
+[`r7rs-tests.scm`](tests/r7rs-corpus/chibi-r7rs-tests.scm) — the de
+facto standard R7RS-small conformance suite — through nscheme. To
+see the baseline:
+
+```bash
+cargo test --test r7rs_chibi -- --nocapture
+```
+
+Sample output:
+
+```
+=== chibi r7rs-tests.scm baseline ===
+  total datums:     1180
+  evaluated:        1180
+  passes:           482
+  failures:         47
+  top-level errors: 575
+  duration:         ~120ms
+```
+
+The `top-level errors` are mostly references to procedures nscheme
+v1 doesn't implement (see "Documented gaps" above). The
+`BASELINE_MIN_PASSES` constant in the test guards against
+regressions — lowering it requires triage in
+[bead `nscheme-i0p`](.beads/issues.jsonl).
+
+### Linting / formatting
+
+```bash
+cargo clippy --all-targets -- -D warnings   # lint (treats warnings as errors)
+cargo fmt                                   # auto-format
+cargo fmt --check                           # verify formatted without changing
+```
+
+### Backlog
+
+```bash
+bd ready              # tasks ready to work on
+bd list --status=open # all open tasks
+bd show <id>          # details on a specific task
 ```
 
 ## License
 
-MIT OR Apache-2.0
+MIT OR Apache-2.0. The chibi-scheme test corpus under
+`tests/r7rs-corpus/chibi-r7rs-tests.scm` is redistributed under its
+original BSD 3-clause license — see
+[`tests/r7rs-corpus/COPYING-chibi-scheme`](tests/r7rs-corpus/COPYING-chibi-scheme).
