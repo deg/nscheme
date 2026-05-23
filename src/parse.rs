@@ -14,7 +14,7 @@
 //! - Reader macros (`'`, `` ` ``, `,`, `,@`) expand to two-element lists.
 //! - Datum comments (`#;`) skip exactly one following datum.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use thiserror::Error;
 
@@ -48,6 +48,12 @@ pub enum ParseError {
 
     #[error("invalid number literal `{lexeme}` at byte {}", span.start)]
     InvalidNumber { lexeme: String, span: Span },
+
+    #[error("undefined datum label `#{label}#` at byte {}", span.start)]
+    UndefinedDatumLabel { label: u64, span: Span },
+
+    #[error("duplicate datum label `#{label}=` at byte {}", span.start)]
+    DuplicateDatumLabel { label: u64, span: Span },
 
     #[error("bytevector element must be an integer in 0..=255 at byte {}", span.start)]
     BadBytevectorElement { span: Span },
@@ -104,12 +110,21 @@ pub fn parse_one(source: &str) -> Result<Value, ParseError> {
 
 struct Parser {
     tokens: VecDeque<Token>,
+    /// Registered datum labels. Each value is a placeholder cons cell
+    /// whose `car`/`cdr` get mutated in place once the labeled datum
+    /// is parsed — that way `#0=(1 . #0#)` produces a real cycle.
+    labels: HashMap<u64, Value>,
+    /// Folding mode (case-insensitive identifiers) — toggled by
+    /// `#!fold-case` / `#!no-fold-case` directives per R7RS §2.1.
+    fold_case: bool,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
         Self {
             tokens: tokens.into(),
+            labels: HashMap::new(),
+            fold_case: false,
         }
     }
 
@@ -125,17 +140,26 @@ impl Parser {
         self.tokens.pop_front()
     }
 
-    /// Parse one datum. Datum-comments are silently skipped here so the
-    /// rest of the parser never sees them.
+    /// Parse one datum. Datum-comments and `#!fold-case` directives
+    /// are silently consumed here so the rest of the parser never
+    /// sees them.
     fn parse_datum(&mut self) -> Result<Value, ParseError> {
-        // Skip any `#; datum` pairs.
-        while let Some(tok) = self.peek() {
-            if !matches!(tok.kind, TokenKind::DatumComment) {
-                break;
+        loop {
+            match self.peek().map(|t| &t.kind) {
+                Some(TokenKind::DatumComment) => {
+                    self.pop();
+                    self.parse_datum()?;
+                }
+                Some(TokenKind::FoldCase) => {
+                    self.pop();
+                    self.fold_case = true;
+                }
+                Some(TokenKind::NoFoldCase) => {
+                    self.pop();
+                    self.fold_case = false;
+                }
+                _ => break,
             }
-            self.pop(); // consume `#;`
-            // The next datum is the one being commented out.
-            self.parse_datum()?;
         }
 
         let Some(tok) = self.pop() else {
@@ -151,16 +175,65 @@ impl Parser {
             TokenKind::Quasiquote => self.parse_quoted("quasiquote"),
             TokenKind::Unquote => self.parse_quoted("unquote"),
             TokenKind::UnquoteSplicing => self.parse_quoted("unquote-splicing"),
-            TokenKind::DatumComment => {
-                // We handled #; at the top of the function; reaching
-                // this branch means a #; with nothing after it.
+            TokenKind::DatumComment | TokenKind::FoldCase | TokenKind::NoFoldCase => {
+                // The loop above handles these; reaching here means
+                // a directive with nothing following it.
                 Err(ParseError::UnexpectedEof)
             }
             TokenKind::Boolean(b) => Ok(Value::Bool(b)),
             TokenKind::Character(c) => Ok(Value::Char(c)),
             TokenKind::String(s) => Ok(Value::string(s)),
-            TokenKind::Identifier(name) => Ok(Value::Symbol(Symbol::intern(&name))),
+            TokenKind::Identifier(name) => {
+                let name = if self.fold_case {
+                    name.to_lowercase()
+                } else {
+                    name
+                };
+                Ok(Value::Symbol(Symbol::intern(&name)))
+            }
             TokenKind::Number(num) => parse_number(&num, tok.span),
+            TokenKind::DatumLabel(n) => self.parse_labelled(n, tok.span),
+            TokenKind::DatumRef(n) => self
+                .labels
+                .get(&n)
+                .cloned()
+                .ok_or(ParseError::UndefinedDatumLabel {
+                    label: n,
+                    span: tok.span,
+                }),
+        }
+    }
+
+    /// Parse a `#N=<datum>` form. Pre-allocates a placeholder cons
+    /// cell registered under the label so that any `#N#` references
+    /// inside `<datum>` see a stable Pair — once parsing completes,
+    /// the placeholder is mutated to mirror the actual datum.
+    fn parse_labelled(&mut self, label: u64, span: Span) -> Result<Value, ParseError> {
+        if self.labels.contains_key(&label) {
+            return Err(ParseError::DuplicateDatumLabel { label, span });
+        }
+        let placeholder = Value::cons(Value::Unspecified, Value::Unspecified);
+        self.labels.insert(label, placeholder.clone());
+        let datum = self.parse_datum()?;
+        match (&placeholder, &datum) {
+            (Value::Pair(holder), Value::Pair(real)) => {
+                // Patch the placeholder so all back-references that
+                // already point at `holder` now see the real cells.
+                let r = real.borrow();
+                let mut h = holder.borrow_mut();
+                h.car = r.car.clone();
+                h.cdr = r.cdr.clone();
+                drop(h);
+                drop(r);
+                Ok(placeholder)
+            }
+            (Value::Pair(_), _) => {
+                // Labeled atom — replace the registered value so that
+                // any later `#N#` references resolve to the atom too.
+                self.labels.insert(label, datum.clone());
+                Ok(datum)
+            }
+            _ => unreachable!("placeholder is always a Pair"),
         }
     }
 
@@ -192,6 +265,15 @@ impl Parser {
                     }
                     self.pop(); // consume `.`
                     let tail = self.parse_datum()?;
+                    // Skip any datum-comments between the cdr and
+                    // the closing `)`: `(a . b #;c)` is well-formed.
+                    while let Some(tok) = self.peek() {
+                        if !matches!(tok.kind, TokenKind::DatumComment) {
+                            break;
+                        }
+                        self.pop();
+                        self.parse_datum()?;
+                    }
                     let closing = self
                         .pop()
                         .ok_or(ParseError::UnclosedList { span: open_span })?;
@@ -286,12 +368,15 @@ fn parse_number(num: &NumberLexeme, span: Span) -> Result<Value, ParseError> {
         span,
     };
 
-    // +inf.0 / -inf.0 / +nan.0 / -nan.0 (only valid in radix 10).
-    if radix == 10 {
-        match body.as_str() {
-            "+inf.0" | "+INF.0" => return Ok(Value::Float(f64::INFINITY)),
-            "-inf.0" | "-INF.0" => return Ok(Value::Float(f64::NEG_INFINITY)),
-            "+nan.0" | "-nan.0" | "+NAN.0" | "-NAN.0" => return Ok(Value::Float(f64::NAN)),
+    // +inf.0 / -inf.0 / +nan.0 / -nan.0 are case-insensitive in
+    // radix 10 (R7RS §7.1.1 — the lexeme matches `[+-](inf|nan).0`
+    // regardless of letter case).
+    if radix == 10 && body.len() == 6 {
+        let lower = body.to_ascii_lowercase();
+        match lower.as_str() {
+            "+inf.0" => return Ok(Value::Float(f64::INFINITY)),
+            "-inf.0" => return Ok(Value::Float(f64::NEG_INFINITY)),
+            "+nan.0" | "-nan.0" => return Ok(Value::Float(f64::NAN)),
             _ => {}
         }
     }
@@ -326,12 +411,23 @@ fn parse_number(num: &NumberLexeme, span: Span) -> Result<Value, ParseError> {
         return Ok(normalize_rational(r));
     }
 
-    let looks_inexact =
-        radix == 10 && (body.contains('.') || body.contains('e') || body.contains('E'));
+    // R7RS allows `e/E` as the exponent marker. Chibi (and many older
+    // Schemes / R6RS) accept the precision-tagged markers
+    // `s/S/f/F/d/D/l/L` too — we normalize them to `e` before
+    // handing the literal to Rust's float parser.
+    let exponent_chars = ['s', 'S', 'f', 'F', 'd', 'D', 'l', 'L'];
+    let body_has_marker = body.contains('.')
+        || body.contains('e')
+        || body.contains('E')
+        || body.chars().any(|c| exponent_chars.contains(&c));
+    let looks_inexact = radix == 10 && body_has_marker;
 
     if looks_inexact {
-        // f64 parse handles `.5`, `1e10`, `-2.5e-3`, etc.
-        let f: f64 = body.parse().map_err(|_| bad())?;
+        let normalised: String = body
+            .chars()
+            .map(|c| if exponent_chars.contains(&c) { 'e' } else { c })
+            .collect();
+        let f: f64 = normalised.parse().map_err(|_| bad())?;
         // #e prefix on a decimal: convert to exact rational.
         if matches!(num.exactness, Exactness::Exact) {
             return Ok(Value::Rational(Rc::new(float_to_rational_or_error(

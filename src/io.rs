@@ -75,12 +75,16 @@ pub fn install_io(env: &EnvRef) {
         Ok(Value::Bool(matches!(a[0], Value::Port(_))))
     });
     define_prim(env, "textual-port?", Arity::Exact(1), |a| {
-        // Every port in v1 is textual.
-        Ok(Value::Bool(matches!(a[0], Value::Port(_))))
+        Ok(Value::Bool(match &a[0] {
+            Value::Port(p) => !p.borrow().is_binary(),
+            _ => false,
+        }))
     });
     define_prim(env, "binary-port?", Arity::Exact(1), |a| {
-        let _ = a;
-        Ok(Value::Bool(false))
+        Ok(Value::Bool(match &a[0] {
+            Value::Port(p) => p.borrow().is_binary(),
+            _ => false,
+        }))
     });
     define_prim(env, "eof-object", Arity::Exact(0), |a| {
         let _ = a;
@@ -111,14 +115,11 @@ pub fn install_io(env: &EnvRef) {
         Arity::Exact(1),
         |a| match &a[0] {
             Value::Bytevector(b) => {
-                // Interpret bytes as UTF-8 if valid; otherwise create a
-                // string-input port over the raw bytes coerced to chars.
                 let bytes = b.borrow().clone();
                 let s = String::from_utf8(bytes).unwrap_or_else(|e| {
-                    // Fallback: render invalid bytes as Latin-1
                     e.into_bytes().iter().map(|&b| b as char).collect()
                 });
-                Ok(Value::Port(Rc::new(RefCell::new(Port::StringInput {
+                Ok(Value::Port(Rc::new(RefCell::new(Port::BinaryInput {
                     content: s,
                     pos: 0,
                 }))))
@@ -127,7 +128,7 @@ pub fn install_io(env: &EnvRef) {
         },
     );
     define_prim(env, "open-output-bytevector", Arity::Exact(0), |_| {
-        Ok(Value::Port(Rc::new(RefCell::new(Port::StringOutput {
+        Ok(Value::Port(Rc::new(RefCell::new(Port::BinaryOutput {
             buffer: String::new(),
         }))))
     });
@@ -137,7 +138,9 @@ pub fn install_io(env: &EnvRef) {
         Arity::Exact(1),
         |a| match &a[0] {
             Value::Port(p) => match &*p.borrow() {
-                Port::StringOutput { buffer } => Ok(Value::bytevector(buffer.as_bytes().to_vec())),
+                Port::BinaryOutput { buffer } | Port::StringOutput { buffer } => {
+                    Ok(Value::bytevector(buffer.as_bytes().to_vec()))
+                }
                 _ => Err(RuntimeError::Other(
                     "get-output-bytevector: not a bytevector output port".into(),
                 )),
@@ -153,7 +156,9 @@ pub fn install_io(env: &EnvRef) {
             Some(Value::Port(p)) => {
                 let mut port = p.borrow_mut();
                 match &mut *port {
-                    Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => {
+                    Port::StringInput { content, pos }
+                    | Port::BinaryInput { content, pos }
+                    | Port::FileInput { content, pos, .. } => {
                         let bytes = content.as_bytes();
                         if *pos >= bytes.len() {
                             return Ok(Value::Eof);
@@ -176,7 +181,9 @@ pub fn install_io(env: &EnvRef) {
             Some(Value::Port(p)) => {
                 let port = p.borrow();
                 match &*port {
-                    Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => {
+                    Port::StringInput { content, pos }
+                    | Port::BinaryInput { content, pos }
+                    | Port::FileInput { content, pos, .. } => {
                         let bytes = content.as_bytes();
                         if *pos >= bytes.len() {
                             return Ok(Value::Eof);
@@ -204,6 +211,41 @@ pub fn install_io(env: &EnvRef) {
         // Conservatively report ready — we don't have non-blocking I/O.
         Ok(Value::Bool(true))
     });
+    // R7RS `write-bytevector bv [port [start [end]]]`: write the raw
+    // bytes of `bv[start..end]` to a binary output port (interpreted
+    // as the underlying String's bytes here).
+    define_prim(
+        env,
+        "write-bytevector",
+        Arity::Range { min: 1, max: 4 },
+        |a| {
+            let Value::Bytevector(bv) = &a[0] else {
+                return Err(type_err("bytevector", &a[0]));
+            };
+            let bytes = bv.borrow();
+            let start = if a.len() > 2 {
+                value_to_usize(&a[2], "write-bytevector")?
+            } else {
+                0
+            };
+            let end = if a.len() > 3 {
+                value_to_usize(&a[3], "write-bytevector")?
+            } else {
+                bytes.len()
+            };
+            if start > end || end > bytes.len() {
+                return Err(RuntimeError::Other(
+                    "write-bytevector: range out of bounds".into(),
+                ));
+            }
+            let slice = &bytes[start..end];
+            // Render via Latin-1 (each byte → one char) so the
+            // string-backed port's UTF-8 buffer round-trips through
+            // get-output-bytevector unchanged.
+            let s: String = slice.iter().map(|&b| b as char).collect();
+            write_to_port(a.get(1), &s)
+        },
+    );
     define_prim(env, "char-ready?", Arity::Range { min: 0, max: 1 }, |_| {
         Ok(Value::Bool(true))
     });
@@ -319,7 +361,9 @@ pub fn install_io(env: &EnvRef) {
             Some(Value::Port(p)) => {
                 let mut port = p.borrow_mut();
                 match &mut *port {
-                    Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => {
+                    Port::StringInput { content, pos }
+                    | Port::BinaryInput { content, pos }
+                    | Port::FileInput { content, pos, .. } => {
                         if *pos >= content.len() {
                             return Ok(Value::Eof);
                         }
@@ -379,6 +423,17 @@ pub fn install_io(env: &EnvRef) {
         let s = format!("{:?}", a[0]);
         write_to_port(a.get(1), &s)
     });
+    define_prim(env, "write-shared", Arity::Range { min: 1, max: 2 }, |a| {
+        use crate::value::WriteShared;
+        let s = format!("{}", WriteShared(&a[0]));
+        write_to_port(a.get(1), &s)
+    });
+    define_prim(env, "write-simple", Arity::Range { min: 1, max: 2 }, |a| {
+        // write-simple: like write but never uses datum labels. May
+        // not terminate on cyclic input — that's the user's problem.
+        let s = format!("{:?}", a[0]);
+        write_to_port(a.get(1), &s)
+    });
     define_prim(env, "newline", Arity::Range { min: 0, max: 1 }, |a| {
         write_to_port(a.first(), "\n")
     });
@@ -425,7 +480,9 @@ pub fn install_io(env: &EnvRef) {
                 ));
             }
             match &mut *port {
-                Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => {
+                Port::StringInput { content, pos }
+                    | Port::BinaryInput { content, pos }
+                    | Port::FileInput { content, pos, .. } => {
                     let bytes = content.as_bytes();
                     if *pos >= bytes.len() {
                         return Ok(Value::Eof);
@@ -527,7 +584,9 @@ fn write_to_port(port: Option<&Value>, s: &str) -> Result<Value, RuntimeError> {
                 Port::StdErr => {
                     eprint!("{s}");
                 }
-                Port::StringOutput { buffer } | Port::FileOutput { buffer, .. } => {
+                Port::StringOutput { buffer }
+                | Port::BinaryOutput { buffer }
+                | Port::FileOutput { buffer, .. } => {
                     buffer.push_str(s);
                 }
                 Port::Closed => {
@@ -547,7 +606,9 @@ fn write_to_port(port: Option<&Value>, s: &str) -> Result<Value, RuntimeError> {
 /// Returns `eof-object` when no datum remains.
 fn read_datum_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
     match port {
-        Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => {
+        Port::StringInput { content, pos }
+                    | Port::BinaryInput { content, pos }
+                    | Port::FileInput { content, pos, .. } => {
             let rest = &content[*pos..];
             let (datum, consumed) = crate::parse::parse_one_with_consumed(rest)
                 .map_err(|e| RuntimeError::ReadError(format!("read: {e}")))?;
@@ -566,7 +627,9 @@ fn read_datum_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
 /// at end of input.
 fn read_char_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
     match port {
-        Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => {
+        Port::StringInput { content, pos }
+                    | Port::BinaryInput { content, pos }
+                    | Port::FileInput { content, pos, .. } => {
             if let Some(c) = content[*pos..].chars().next() {
                 *pos += c.len_utf8();
                 Ok(Value::Char(c))
@@ -598,7 +661,9 @@ fn read_char_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
 
 fn peek_char_from_port(port: &Port) -> Result<Value, RuntimeError> {
     match port {
-        Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => Ok(content
+        Port::StringInput { content, pos }
+                    | Port::BinaryInput { content, pos }
+                    | Port::FileInput { content, pos, .. } => Ok(content
             [*pos..]
             .chars()
             .next()
@@ -615,7 +680,9 @@ fn peek_char_from_port(port: &Port) -> Result<Value, RuntimeError> {
 
 fn read_line_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
     match port {
-        Port::StringInput { content, pos } | Port::FileInput { content, pos, .. } => {
+        Port::StringInput { content, pos }
+                    | Port::BinaryInput { content, pos }
+                    | Port::FileInput { content, pos, .. } => {
             if *pos >= content.len() {
                 return Ok(Value::Eof);
             }

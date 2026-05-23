@@ -370,6 +370,12 @@ pub enum Port {
     StringInput { content: String, pos: usize },
     /// Accumulates writes into a buffer; `get-output-string` returns it.
     StringOutput { buffer: String },
+    /// Reads from an in-memory string but flagged as a binary port
+    /// (R7RS `open-input-bytevector`). All textual operations decode
+    /// the bytes as UTF-8.
+    BinaryInput { content: String, pos: usize },
+    /// Like `StringOutput` but flagged as a binary port.
+    BinaryOutput { buffer: String },
     /// Reads the entire file into memory at open time. Big-file
     /// streaming would need a separate variant.
     FileInput {
@@ -387,15 +393,28 @@ impl Port {
     pub fn is_input(&self) -> bool {
         matches!(
             self,
-            Self::StdIn { .. } | Self::StringInput { .. } | Self::FileInput { .. }
+            Self::StdIn { .. }
+                | Self::StringInput { .. }
+                | Self::BinaryInput { .. }
+                | Self::FileInput { .. }
         )
     }
 
     pub fn is_output(&self) -> bool {
         matches!(
             self,
-            Self::StdOut | Self::StdErr | Self::StringOutput { .. } | Self::FileOutput { .. }
+            Self::StdOut
+                | Self::StdErr
+                | Self::StringOutput { .. }
+                | Self::BinaryOutput { .. }
+                | Self::FileOutput { .. }
         )
+    }
+
+    /// R7RS `binary-port?` — true iff this port is one of the
+    /// bytevector-backed variants.
+    pub fn is_binary(&self) -> bool {
+        matches!(self, Self::BinaryInput { .. } | Self::BinaryOutput { .. })
     }
 }
 
@@ -773,19 +792,50 @@ impl fmt::Display for Value {
     }
 }
 
-/// Top-level entry for write/display. Builds a shared-structure
-/// table first so cycles and shared references are emitted with
-/// R7RS `#N=` / `#N#` datum labels (§6.13.3) rather than recursing
-/// forever on circular structures.
+/// Wrapper that selects R7RS `write-shared` semantics (label shared
+/// substructure as well as cyclic).
+pub struct WriteShared<'a>(pub &'a Value);
+
+impl fmt::Display for WriteShared<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_shared_top_level(self.0, f, /*display=*/ false)
+    }
+}
+
+/// Top-level entry for write/display. Builds a structure table so
+/// cyclic references are emitted with R7RS `#N=` / `#N#` datum
+/// labels (§6.13.3) rather than recursing forever. R7RS `write`
+/// labels only nodes that participate in a cycle; merely shared
+/// (non-cyclic) substructure prints twice. The shared-too variant
+/// is exposed via `write_shared_top_level`.
 fn write_top_level(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt::Result {
-    // First pass: count occurrences of each Pair/Vector by Rc
-    // pointer identity. Values reached more than once get a label.
+    write_top_level_mode(v, f, display, /*label_shared=*/ false)
+}
+
+/// Like `write_top_level`, but emit datum labels for shared structure
+/// too (R7RS `write-shared`).
+pub(crate) fn write_shared_top_level(
+    v: &Value,
+    f: &mut fmt::Formatter<'_>,
+    display: bool,
+) -> fmt::Result {
+    write_top_level_mode(v, f, display, /*label_shared=*/ true)
+}
+
+fn write_top_level_mode(
+    v: &Value,
+    f: &mut fmt::Formatter<'_>,
+    display: bool,
+    label_shared: bool,
+) -> fmt::Result {
     let mut counts: HashMap<usize, usize> = HashMap::new();
+    let mut cyclic: HashSet<usize> = HashSet::new();
     let mut visiting: HashSet<usize> = HashSet::new();
-    count_refs(v, &mut counts, &mut visiting);
-    // Second pass: emit, assigning labels lazily on first visit.
+    count_refs(v, &mut counts, &mut cyclic, &mut visiting);
     let mut state = LabelState {
         counts,
+        cyclic,
+        label_shared,
         labels: HashMap::new(),
         next_label: 0,
     };
@@ -796,35 +846,48 @@ fn write_top_level(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt:
 struct LabelState {
     /// Reference count per shared structure (by Rc pointer).
     counts: HashMap<usize, usize>,
+    /// Set of keys that are part of a cycle.
+    cyclic: HashSet<usize>,
+    /// If true, label nodes whose `counts` > 1 in addition to cyclic
+    /// nodes (used by `write-shared`). Plain `write` labels only
+    /// cyclic nodes.
+    label_shared: bool,
     /// Labels assigned so far (Rc pointer → integer label).
     labels: HashMap<usize, usize>,
     next_label: usize,
 }
 
-fn count_refs(v: &Value, counts: &mut HashMap<usize, usize>, visiting: &mut HashSet<usize>) {
+fn count_refs(
+    v: &Value,
+    counts: &mut HashMap<usize, usize>,
+    cyclic: &mut HashSet<usize>,
+    visiting: &mut HashSet<usize>,
+) {
     let key = shared_key(v);
     if let Some(k) = key {
         let n = counts.entry(k).and_modify(|c| *c += 1).or_insert(1);
-        // Only recurse the FIRST time we see this structure. Subsequent
-        // hits just bump the count.
+        // Already visited above us on the recursion stack — this is a
+        // cycle. Record and don't recurse.
+        if visiting.contains(&k) {
+            cyclic.insert(k);
+            return;
+        }
+        // Already counted (sharing without cycle) — don't recurse
+        // again. Bump count only.
         if *n > 1 {
             return;
         }
-        // Cycle protection: if we're already in the middle of counting
-        // this structure (recursive self-reference), don't recurse again.
-        if !visiting.insert(k) {
-            return;
-        }
+        visiting.insert(k);
     }
     match v {
         Value::Pair(p) => {
             let cell = p.borrow();
-            count_refs(&cell.car, counts, visiting);
-            count_refs(&cell.cdr, counts, visiting);
+            count_refs(&cell.car, counts, cyclic, visiting);
+            count_refs(&cell.cdr, counts, cyclic, visiting);
         }
         Value::Vector(items) => {
             for item in items.borrow().iter() {
-                count_refs(item, counts, visiting);
+                count_refs(item, counts, cyclic, visiting);
             }
         }
         _ => {}
@@ -854,10 +917,12 @@ fn write_value(
     display: bool,
     state: &mut LabelState,
 ) -> fmt::Result {
-    // If this is a shareable Pair/Vector with count > 1, emit a
-    // label on first visit and a backref on subsequent visits.
+    // If this is a shareable Pair/Vector that needs a label (cyclic,
+    // or shared when in write-shared mode), emit a label on first
+    // visit and a backref on subsequent visits.
     if let Some(key) = shared_key(v)
-        && state.counts.get(&key).copied().unwrap_or(0) > 1
+        && (state.cyclic.contains(&key)
+            || (state.label_shared && state.counts.get(&key).copied().unwrap_or(0) > 1))
     {
         if let Some(label) = state.labels.get(&key).copied() {
             return write!(f, "#{label}#");

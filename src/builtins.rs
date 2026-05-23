@@ -136,6 +136,16 @@ fn is_value_inexact(v: &Value) -> bool {
     matches!(v, Value::Float(_))
 }
 
+/// Format a `BigInt` in a non-decimal radix for `number->string`.
+fn format_int_radix(b: &BigInt, radix: u32) -> String {
+    match radix {
+        2 => format!("{b:b}"),
+        8 => format!("{b:o}"),
+        16 => format!("{b:x}"),
+        _ => format!("{b}"),
+    }
+}
+
 /// R7RS §6.6: digit-value returns the numeric value of any character
 /// in Unicode general category Nd (decimal digit). Each Nd block is
 /// ten consecutive codepoints starting at "digit zero" for some
@@ -2042,19 +2052,45 @@ fn install_strings(env: &EnvRef) {
                 return Err(type_err("string", &a[0]));
             };
             let s = s.borrow().clone();
-            // Optional radix (2, 8, 10, 16). Default 10.
-            let _radix = if a.len() == 2 {
+            let radix = if a.len() == 2 {
                 value_to_usize(&a[1], "string->number")?
             } else {
                 10
             };
-            // Quick parse via the existing parser (handles all numeric
-            // forms). If the parse fails OR parses to a non-number,
-            // R7RS says return #f.
-            match crate::parse::parse_one(&s) {
-                Ok(v) if v.is_number() => Ok(v),
-                _ => Ok(Value::Bool(false)),
+            if radix == 10 {
+                // Fast path via the parser, which handles every
+                // numeric form (exact/inexact, rationals, ±inf, etc).
+                return Ok(match crate::parse::parse_one(&s) {
+                    Ok(v) if v.is_number() => v,
+                    _ => Value::Bool(false),
+                });
             }
+            // Non-decimal radix: only integer parsing for v1. Accept
+            // an optional leading `+`/`-` sign.
+            let (radix_u32, _) = match radix {
+                2 => (2u32, "2"),
+                8 => (8u32, "8"),
+                16 => (16u32, "16"),
+                _ => return Ok(Value::Bool(false)),
+            };
+            let trimmed = s.trim();
+            let (sign, digits) = match trimmed.as_bytes().first() {
+                Some(b'-') => (-1i64, &trimmed[1..]),
+                Some(b'+') => (1i64, &trimmed[1..]),
+                _ => (1i64, trimmed),
+            };
+            if digits.is_empty() {
+                return Ok(Value::Bool(false));
+            }
+            // First try i64, then fall back to BigInt for big values.
+            if let Ok(n) = i64::from_str_radix(digits, radix_u32) {
+                return Ok(Value::Int(sign * n));
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Ok(match BigInt::parse_bytes(digits.as_bytes(), radix_u32) {
+                Some(b) => bigint_to_value(if sign < 0 { -b } else { b }),
+                None => Value::Bool(false),
+            })
         },
     );
     define(
@@ -2062,13 +2098,39 @@ fn install_strings(env: &EnvRef) {
         "number->string",
         Arity::Range { min: 1, max: 2 },
         |a| {
-            // We render via Display for radix=10; other radices not yet
-            // supported beyond integers.
-            match &a[0] {
-                Value::Int(_) | Value::BigInt(_) | Value::Rational(_) | Value::Float(_) => {
-                    Ok(Value::string(format!("{}", a[0])))
+            let radix = if a.len() == 2 {
+                value_to_usize(&a[1], "number->string")?
+            } else {
+                10
+            };
+            if radix == 10 {
+                return match &a[0] {
+                    Value::Int(_)
+                    | Value::BigInt(_)
+                    | Value::Rational(_)
+                    | Value::Float(_) => Ok(Value::string(format!("{}", a[0]))),
+                    other => Err(type_err("number", other)),
+                };
+            }
+            let radix_u32 = match radix {
+                2 => 2u32,
+                8 => 8,
+                16 => 16,
+                _ => {
+                    return Err(RuntimeError::Other(
+                        "number->string: radix must be 2, 8, 10 or 16".into(),
+                    ));
                 }
-                other => Err(type_err("number", other)),
+            };
+            match &a[0] {
+                Value::Int(n) => Ok(Value::string(format_int_radix(
+                    &BigInt::from(*n),
+                    radix_u32,
+                ))),
+                Value::BigInt(b) => Ok(Value::string(format_int_radix(b, radix_u32))),
+                other => Err(RuntimeError::Other(format!(
+                    "number->string: non-integer not supported for radix {radix}: {other}"
+                ))),
             }
         },
     );

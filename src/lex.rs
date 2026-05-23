@@ -90,6 +90,18 @@ pub enum TokenKind {
     /// An identifier (a regular one, a `|...|`-quoted one, or a peculiar
     /// identifier like `+`, `-`, or `...`).
     Identifier(String),
+    /// `#N=` — R7RS datum-label definition (introduces a label that
+    /// will refer to the following datum).
+    DatumLabel(u64),
+    /// `#N#` — R7RS datum-label reference (back-reference to an
+    /// earlier `#N=…` label).
+    DatumRef(u64),
+    /// `#!fold-case` directive — switches the reader into
+    /// case-insensitive identifier folding (R7RS §2.1).
+    FoldCase,
+    /// `#!no-fold-case` directive — restores case-sensitive
+    /// identifier folding.
+    NoFoldCase,
 }
 
 /// A token paired with its source span.
@@ -435,13 +447,63 @@ impl<'a> Lexer<'a> {
                 self.advance(';');
                 Ok(self.tok(TokenKind::DatumComment, start))
             }
-            'e' | 'i' | 'b' | 'o' | 'd' | 'x' => self.lex_number_prefixed(start),
+            '!' => self.lex_directive(start),
+            '0'..='9' => self.lex_datum_label(start),
+            'e' | 'E' | 'i' | 'I' | 'b' | 'B' | 'o' | 'O' | 'd' | 'D' | 'x' | 'X' => {
+                self.lex_number_prefixed(start)
+            }
             _ => {
                 self.advance(c);
                 Err(LexError::InvalidHashSyntax {
                     span: Span::new(start, self.pos),
                 })
             }
+        }
+    }
+
+    /// Lex `#N=` (DatumLabel) or `#N#` (DatumRef).
+    fn lex_datum_label(&mut self, start: usize) -> Result<Token, LexError> {
+        let mut n: u64 = 0;
+        while let Some(c) = self.peek_char() {
+            if let Some(d) = c.to_digit(10) {
+                n = n.saturating_mul(10).saturating_add(u64::from(d));
+                self.advance(c);
+            } else {
+                break;
+            }
+        }
+        match self.peek_char() {
+            Some('=') => {
+                self.advance('=');
+                Ok(self.tok(TokenKind::DatumLabel(n), start))
+            }
+            Some('#') => {
+                self.advance('#');
+                Ok(self.tok(TokenKind::DatumRef(n), start))
+            }
+            _ => Err(LexError::InvalidHashSyntax {
+                span: Span::new(start, self.pos),
+            }),
+        }
+    }
+
+    /// Lex `#!fold-case` / `#!no-fold-case` directives.
+    fn lex_directive(&mut self, start: usize) -> Result<Token, LexError> {
+        self.advance('!');
+        let dir_start = self.pos;
+        while let Some(c) = self.peek_char() {
+            if is_delimiter(c) {
+                break;
+            }
+            self.advance(c);
+        }
+        let name = &self.src[dir_start..self.pos];
+        match name {
+            "fold-case" => Ok(self.tok(TokenKind::FoldCase, start)),
+            "no-fold-case" => Ok(self.tok(TokenKind::NoFoldCase, start)),
+            _ => Err(LexError::InvalidHashSyntax {
+                span: Span::new(start, self.pos),
+            }),
         }
     }
 
@@ -647,12 +709,11 @@ impl<'a> Lexer<'a> {
             Some(c) if c.is_ascii_digit() => true,
             Some('.') => matches!(self.peek_char_at(2), Some(c) if c.is_ascii_digit()),
             Some('i' | 'I' | 'n' | 'N') => {
-                // +inf.0 / +nan.0 / -inf.0 / -nan.0
+                // +inf.0 / +nan.0 / -inf.0 / -nan.0 — case-insensitive
+                // per R7RS §7.1.1 lexical syntax.
                 let rest = &self.src[self.pos + sign.len_utf8()..];
-                rest.starts_with("inf.0")
-                    || rest.starts_with("nan.0")
-                    || rest.starts_with("INF.0")
-                    || rest.starts_with("NAN.0")
+                let prefix4: String = rest.chars().take(5).collect();
+                prefix4.eq_ignore_ascii_case("inf.0") || prefix4.eq_ignore_ascii_case("nan.0")
             }
             _ => false,
         };

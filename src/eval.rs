@@ -1883,7 +1883,38 @@ fn qq_expand(template: &Value, env: &EnvRef, depth: usize) -> Result<Value, Eval
             let items = items.borrow().clone();
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(qq_expand(&item, env, depth)?);
+                // R7RS §4.2.6: `,@form` inside a vector splices the
+                // evaluated list into the vector at that position.
+                if let Some((h, t)) = item.as_pair()
+                    && let Value::Symbol(s) = &h
+                    && s.name() == "unquote-splicing"
+                    && depth == 1
+                {
+                    let mut iter = ListIter::new(t);
+                    let expr = iter.next().ok_or_else(|| {
+                        EvalError::malformed("unquote-splicing", "expected one expression")
+                    })??;
+                    let spliced = eval(expr, env.clone())?;
+                    let mut cur = spliced;
+                    loop {
+                        match cur {
+                            Value::Null => break,
+                            Value::Pair(p) => {
+                                let cell = p.borrow();
+                                out.push(cell.car.clone());
+                                cur = cell.cdr.clone();
+                            }
+                            _ => {
+                                return Err(EvalError::malformed(
+                                    "unquote-splicing",
+                                    "result must be a proper list",
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    out.push(qq_expand(&item, env, depth)?);
+                }
             }
             Ok(Value::vector(out))
         }
