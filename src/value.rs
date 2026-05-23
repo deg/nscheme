@@ -229,6 +229,12 @@ pub enum Procedure {
         type_id: Rc<RecordTypeId>,
         field_index: usize,
     },
+    /// Internal control procedure that drives `dynamic-wind`. When
+    /// applied with `(before thunk after)`, sets up the wind-aware
+    /// extent and runs the three thunks in the right order. Not
+    /// exposed as a bindable procedure; see
+    /// `step_dynamic_wind` in the evaluator.
+    DynamicWindStart,
 }
 
 /// One arity-arm of a `case-lambda` procedure.
@@ -257,6 +263,7 @@ impl Procedure {
             | Self::RecordPredicate { type_id, .. }
             | Self::RecordAccessor { type_id, .. }
             | Self::RecordMutator { type_id, .. } => &type_id.name,
+            Self::DynamicWindStart => "%dynamic-wind-apply",
         }
     }
 }
@@ -311,6 +318,7 @@ impl fmt::Debug for Procedure {
                 .field("type", &type_id.name)
                 .field("field", field_index)
                 .finish(),
+            Self::DynamicWindStart => f.write_str("%dynamic-wind-apply"),
         }
     }
 }

@@ -58,6 +58,13 @@ pub fn install_base(env: &EnvRef) -> Result<(), EvalError> {
     install_bytevectors(env);
     install_inexact(env);
     crate::io::install_io(env);
+    // Internal hook used by the `dynamic-wind` special form: a
+    // singleton procedure that the eval loop recognises and turns
+    // into a wind-aware setup. See `step_apply` in eval.rs.
+    env.define(
+        Symbol::intern("%dynamic-wind-apply"),
+        Value::Procedure(Rc::new(Procedure::DynamicWindStart)),
+    );
     eval_source(BOOTSTRAP, env.clone())?;
     eval_source(crate::io::CURRENT_PORTS_BOOTSTRAP, env.clone())?;
     Ok(())
@@ -2838,15 +2845,9 @@ const BOOTSTRAP: &str = r"
 (define (caddr p) (car (cdr (cdr p))))
 (define (cadddr p) (car (cdr (cdr (cdr p)))))
 
-;; Simple dynamic-wind. R7RS requires before/after to also fire on
-;; continuation jumps in/out of the protected region. The continuation
-;; bead (nscheme-0xn) documents that v1 only guarantees the linear
-;; case (no escape).
-(define (dynamic-wind before thunk after)
-  (before)
-  (let ((result (thunk)))
-    (after)
-    result))
+;; dynamic-wind is implemented as a Rust special form (see
+;; step_dynamic_wind in eval.rs) so its `before` / `after` thunks
+;; can fire on call/cc jumps that cross the wind boundary.
 
 ;; (error msg arg ...) — build an error-object and raise it.
 (define (error msg . irritants)

@@ -204,6 +204,37 @@ pub enum Frame {
     ParameterRestore {
         saved: Vec<(Rc<crate::value::ParameterCell>, Value)>,
     },
+    /// `dynamic-wind` extent marker. The `before` and `after` thunks
+    /// are kept so a `call/cc` jump that crosses this frame can
+    /// re-enter (`before`) or leave (`after`) the wind correctly.
+    /// `id` distinguishes nested winds across continuation
+    /// invocations.
+    DynamicWind { id: u64, before: Value, after: Value },
+    /// `dynamic-wind` helper: after the user thunk returns, fire
+    /// the `after` thunk. We save the thunk's result first (the
+    /// frame transitions to `DynamicWindFinish` once `after` runs).
+    DynamicWindAfter { after: Value },
+    /// `dynamic-wind` helper: `after` has finished; return the
+    /// previously-saved thunk result.
+    DynamicWindFinish { thunk_result: Value },
+    /// `dynamic-wind` helper: after the `before` thunk returns,
+    /// install the `DynamicWind` marker and apply the body thunk.
+    DynamicWindCallThunk {
+        id: u64,
+        thunk: Value,
+        before: Value,
+        after: Value,
+    },
+    /// Helper frame for continuation invocation across dynamic-wind
+    /// boundaries (R7RS §6.10). Each step pops the next `after` (or
+    /// `before` when afters are empty) and applies it; once both
+    /// queues drain, the saved frames + value get reinstalled.
+    WindJump {
+        afters: Vec<Value>,
+        befores: Vec<Value>,
+        target_frames: Vec<Frame>,
+        target_value: Value,
+    },
 }
 
 // ---------------------------------------------------------------------
@@ -225,8 +256,39 @@ pub fn eval(expr: Value, env: EnvRef) -> Result<Value, EvalError> {
                 None => return Ok(value),
             },
             Step::InvokeContinuation(saved, value) => {
-                frames = saved;
-                Step::Return(value)
+                // R7RS §6.10: before/after thunks of any
+                // dynamic-wind extents that we leave/enter must
+                // fire. Diff current and target wind chains, then
+                // schedule the dance via Frame::WindJump.
+                let cur_winds = wind_chain(&frames);
+                let tgt_winds = wind_chain(&saved);
+                let lca = wind_lca(&cur_winds, &tgt_winds);
+                // afters: from current[lca..] innermost first
+                let afters: Vec<Value> = cur_winds[lca..]
+                    .iter()
+                    .rev()
+                    .map(|w| w.2.clone())
+                    .collect();
+                // befores: from target[lca..] outermost first
+                let befores: Vec<Value> = tgt_winds[lca..]
+                    .iter()
+                    .map(|w| w.1.clone())
+                    .collect();
+                if afters.is_empty() && befores.is_empty() {
+                    frames = saved;
+                    Step::Return(value)
+                } else {
+                    // Start the dance from the current frame stack
+                    // — the WindJump frame runs each thunk in turn,
+                    // then installs `saved` and returns `value`.
+                    frames.push(Frame::WindJump {
+                        afters,
+                        befores,
+                        target_frames: saved,
+                        target_value: value,
+                    });
+                    Step::Return(Value::Unspecified)
+                }
             }
             Step::Raise(value, continuable) => {
                 // Walk the frame stack looking for an ExceptionHandler.
@@ -379,6 +441,7 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
                 return step_with_exception_handler_real(tail, env, frames);
             }
             "guard" => return step_guard_real(tail, env, frames),
+            "dynamic-wind" => return step_dynamic_wind(tail, env, frames),
             _ => { /* fall through to procedure call or macro */ }
         }
         // Macro application: if the head symbol resolves to a Macro
@@ -1184,6 +1247,84 @@ fn step_call_cc(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Ste
         env: env.clone(),
     });
     Ok(Step::Eval(proc_expr, env))
+}
+
+thread_local! {
+    static WIND_ID_COUNTER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn fresh_wind_id() -> u64 {
+    WIND_ID_COUNTER.with(|c| {
+        let n = c.get();
+        c.set(n + 1);
+        n
+    })
+}
+
+/// Walk `frames` bottom-up and return `(id, before, after)` for
+/// every `Frame::DynamicWind` marker. Used by the `call/cc` dance to
+/// diff current vs. target wind chains.
+fn wind_chain(frames: &[Frame]) -> Vec<(u64, Value, Value)> {
+    frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::DynamicWind { id, before, after } => {
+                Some((*id, before.clone(), after.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Length of the longest common prefix of two wind chains (by id).
+fn wind_lca(a: &[(u64, Value, Value)], b: &[(u64, Value, Value)]) -> usize {
+    a.iter()
+        .zip(b.iter())
+        .take_while(|((ai, _, _), (bi, _, _))| ai == bi)
+        .count()
+}
+
+/// `(dynamic-wind before thunk after)` per R7RS §6.10. The three
+/// arguments are 0-arg procedures. `before` and `after` are
+/// re-invoked whenever a continuation jump leaves or re-enters the
+/// dynamic extent of the `thunk` call.
+///
+/// Implementation: this is a special form (not a primitive) so the
+/// extent marker can live as a `Frame::DynamicWind` on the eval
+/// stack. `call/cc` captures the stack, so a saved continuation
+/// remembers which winds it was inside. On invocation we diff the
+/// current wind chain against the saved one and dance through the
+/// difference (afters then befores) before restoring the saved
+/// frames.
+///
+/// We rewrite the form as `(<%dynamic-wind-apply> before thunk
+/// after)` so the operands evaluate via the normal `CallArg`
+/// machinery, and the `%dynamic-wind-apply` primitive then sets up
+/// the wind frames and returns a multi-step plan.
+fn step_dynamic_wind(
+    tail: Value,
+    env: EnvRef,
+    frames: &mut Vec<Frame>,
+) -> Result<Step, EvalError> {
+    let parts = collect_list(&tail).map_err(|()| {
+        EvalError::malformed("dynamic-wind", "expected (dynamic-wind before thunk after)")
+    })?;
+    if parts.len() != 3 {
+        return Err(EvalError::malformed(
+            "dynamic-wind",
+            "expected three operands: before, thunk, after",
+        ));
+    }
+    // (((lambda (b t a) (%dynamic-wind-apply b t a)) before thunk after))
+    let mksym = |s: &str| Value::Symbol(Symbol::intern(s));
+    let rewritten = Value::list_from([
+        mksym("%dynamic-wind-apply"),
+        parts[0].clone(),
+        parts[1].clone(),
+        parts[2].clone(),
+    ]);
+    let _ = frames;
+    Ok(Step::Eval(rewritten, env))
 }
 
 fn step_cond_expand(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
@@ -2303,6 +2444,28 @@ fn step_apply(
                 })),
             }
         }
+        Procedure::DynamicWindStart => {
+            if args.len() != 3 {
+                return Err(EvalError::Runtime(RuntimeError::Arity {
+                    procedure: "dynamic-wind".into(),
+                    expected: "exactly 3".into(),
+                    got: args.len(),
+                }));
+            }
+            let mut it = args.into_iter();
+            let before = it.next().unwrap();
+            let thunk = it.next().unwrap();
+            let after = it.next().unwrap();
+            // After `before` returns, the DynamicWindCallThunk frame
+            // pushes a Wind marker and applies the user thunk.
+            frames.push(Frame::DynamicWindCallThunk {
+                id: fresh_wind_id(),
+                thunk,
+                before: before.clone(),
+                after,
+            });
+            Ok(Step::Apply(before, vec![]))
+        }
     }
 }
 
@@ -2480,6 +2643,80 @@ fn resume(frame: Frame, value: Value, frames: &mut Vec<Frame>) -> Result<Step, E
                 *cell.value.borrow_mut() = old;
             }
             Ok(Step::Return(value))
+        }
+        Frame::DynamicWindCallThunk {
+            id,
+            thunk,
+            before,
+            after,
+        } => {
+            // `before` just returned; install the wind marker (so
+            // call/cc inside the thunk sees us in this wind) and
+            // apply the user thunk. The wind marker stays below
+            // DynamicWindAfter so it remains while `thunk` runs and
+            // pops out together with it on success.
+            let _ = value;
+            frames.push(Frame::DynamicWind {
+                id,
+                before,
+                after: after.clone(),
+            });
+            frames.push(Frame::DynamicWindAfter { after });
+            Ok(Step::Apply(thunk, vec![]))
+        }
+        Frame::DynamicWind { .. } => {
+            // Pure marker — drop and forward.
+            Ok(Step::Return(value))
+        }
+        Frame::DynamicWindAfter { after } => {
+            // The user thunk just returned `value`. Pop the
+            // DynamicWind marker below (we're leaving the wind),
+            // save the thunk's value, then call `after`.
+            // DynamicWindFinish produces `value` after `after` runs.
+            if let Some(Frame::DynamicWind { .. }) = frames.last() {
+                frames.pop();
+            }
+            frames.push(Frame::DynamicWindFinish {
+                thunk_result: value,
+            });
+            Ok(Step::Apply(after, vec![]))
+        }
+        Frame::DynamicWindFinish { thunk_result } => {
+            let _ = value;
+            Ok(Step::Return(thunk_result))
+        }
+        Frame::WindJump {
+            mut afters,
+            mut befores,
+            target_frames,
+            target_value,
+        } => {
+            // Each iteration: run the next leftover thunk; once both
+            // queues are empty, install the saved frames + value.
+            let _ = value;
+            if !afters.is_empty() {
+                let next = afters.remove(0);
+                frames.push(Frame::WindJump {
+                    afters,
+                    befores,
+                    target_frames,
+                    target_value,
+                });
+                return Ok(Step::Apply(next, vec![]));
+            }
+            if !befores.is_empty() {
+                let next = befores.remove(0);
+                frames.push(Frame::WindJump {
+                    afters,
+                    befores,
+                    target_frames,
+                    target_value,
+                });
+                return Ok(Step::Apply(next, vec![]));
+            }
+            // Both drained — restore target.
+            *frames = target_frames;
+            Ok(Step::Return(target_value))
         }
         Frame::InstallHandler { thunk_expr, env } => {
             // `value` is the evaluated handler. Install it and call
