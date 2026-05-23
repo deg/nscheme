@@ -391,6 +391,7 @@ pub fn install_io(env: &EnvRef) {
                     let mut port = p.borrow_mut();
                     match &mut *port {
                         Port::StringInput { content, pos }
+                        | Port::BinaryInput { content, pos }
                         | Port::FileInput { content, pos, .. } => {
                             if *pos >= content.len() {
                                 return Ok(Value::Eof);

@@ -304,6 +304,7 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
         | Value::BigInt(_)
         | Value::Rational(_)
         | Value::Float(_)
+        | Value::Complex(_)
         | Value::String(_)
         | Value::Vector(_)
         | Value::Bytevector(_)

@@ -448,6 +448,13 @@ pub enum Value {
     Rational(Rc<BigRational>),
     /// An inexact real (R7RS `flonum`).
     Float(f64),
+    /// An inexact complex number stored as a Cartesian (re, im)
+    /// pair. R7RS allows complex numbers to have exact real and
+    /// imaginary parts independently; nscheme v1 restricts the
+    /// complex slot of the tower to inexact only — exact complex
+    /// values with imaginary part 0 collapse to a real value when
+    /// constructed by `make-rectangular` or by the reader.
+    Complex(Rc<(f64, f64)>),
     /// A mutable string.
     String(Rc<RefCell<String>>),
     /// A pair (cons cell).
@@ -570,7 +577,7 @@ impl Value {
     pub fn is_number(&self) -> bool {
         matches!(
             self,
-            Self::Int(_) | Self::BigInt(_) | Self::Rational(_) | Self::Float(_)
+            Self::Int(_) | Self::BigInt(_) | Self::Rational(_) | Self::Float(_) | Self::Complex(_)
         )
     }
 
@@ -646,7 +653,11 @@ impl Value {
             Self::Bool(_) => "boolean",
             Self::Char(_) => "char",
             Self::Symbol(_) => "symbol",
-            Self::Int(_) | Self::BigInt(_) | Self::Rational(_) | Self::Float(_) => "number",
+            Self::Int(_)
+            | Self::BigInt(_)
+            | Self::Rational(_)
+            | Self::Float(_)
+            | Self::Complex(_) => "number",
             Self::String(_) => "string",
             Self::Pair(_) => "pair",
             Self::Vector(_) => "vector",
@@ -714,6 +725,11 @@ pub fn eqv(a: &Value, b: &Value) -> bool {
         (Value::Float(x), Value::Float(y)) => {
             // R7RS §6.1: NaN is eqv? to itself.
             x.to_bits() == y.to_bits()
+        }
+        (Value::Complex(x), Value::Complex(y)) => {
+            // Bit-pattern match each component so NaN parts compare
+            // equal to themselves (mirroring the Float arm).
+            x.0.to_bits() == y.0.to_bits() && x.1.to_bits() == y.1.to_bits()
         }
         // Cross-exactness comparisons are always #f.
         _ => eq(a, b),
@@ -977,6 +993,29 @@ fn write_value_body(
             write!(f, "{r}")
         }
         Value::Float(x) => write_float(*x, f),
+        Value::Complex(c) => {
+            let (re, im) = **c;
+            // R7RS lexeme: `<re><sign><|im|>i` or, when re=0, just
+            // `±<|im|>i`. Special-case ±1.0 imaginary to print `+i`
+            // / `-i`. NaN/infinity imag parts are formatted via the
+            // same writer that handles real Float output.
+            if re != 0.0 || (re == 0.0 && re.is_sign_negative()) {
+                write_float(re, f)?;
+                if im.is_sign_negative() || im.is_nan() {
+                    // write_float already emits the sign.
+                    write_float(im, f)?;
+                } else {
+                    f.write_str("+")?;
+                    write_float(im, f)?;
+                }
+            } else if im.is_sign_negative() {
+                write_float(im, f)?;
+            } else {
+                f.write_str("+")?;
+                write_float(im, f)?;
+            }
+            f.write_str("i")
+        }
         Value::String(s) => {
             if display {
                 f.write_str(&s.borrow())
@@ -1062,9 +1101,10 @@ fn symbol_needs_pipes(name: &str) -> bool {
 
 fn looks_numeric(s: &str) -> bool {
     // Approximations: starts with digit; OR sign-then-digit/dot;
-    // OR `+inf.0`/`-inf.0`/`+nan.0`/`-nan.0` (any case).
+    // OR `+inf.0` / `-inf.0` / `+nan.0` / `-nan.0` (any case);
+    // OR `+i` / `-i` (the complex unit imaginary).
     let lower = s.to_ascii_lowercase();
-    if matches!(lower.as_str(), "+inf.0" | "-inf.0" | "+nan.0" | "-nan.0") {
+    if matches!(lower.as_str(), "+inf.0" | "-inf.0" | "+nan.0" | "-nan.0" | "+i" | "-i") {
         return true;
     }
     let bytes = s.as_bytes();
@@ -1077,6 +1117,18 @@ fn looks_numeric(s: &str) -> bool {
         if next.is_ascii_digit() || next == b'.' {
             return true;
         }
+    }
+    // `+inf.0xyz` / `-nan.0xyz` etc.: starts like an infinity/NaN
+    // lexeme and trails extra subsequent characters. R7RS doesn't
+    // make this a numeric lexeme, but the writer pipe-quotes such
+    // names to avoid the reader misinterpreting them.
+    if (lower.starts_with("+inf.0")
+        || lower.starts_with("-inf.0")
+        || lower.starts_with("+nan.0")
+        || lower.starts_with("-nan.0"))
+        && s.len() > 6
+    {
+        return true;
     }
     false
 }

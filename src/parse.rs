@@ -381,17 +381,19 @@ fn parse_number(num: &NumberLexeme, span: Span) -> Result<Value, ParseError> {
         }
     }
 
-    // Complex numbers — recognized lexically but not yet implemented.
-    // Returning a sentinel symbol rather than erroring lets the
-    // chibi conformance corpus parse end-to-end so the relevant
-    // tests fail gracefully (the symbol is undefined at use sites)
-    // instead of aborting the whole run with a parse error.
-    if body.contains('i') || body.contains('@') {
-        let _ = span;
-        return Ok(Value::Symbol(Symbol::intern(&format!(
-            "#unparseable-number:{}",
-            format_lexeme(num)
-        ))));
+    // Complex numbers. nscheme stores complex values inexactly (a
+    // pair of f64) — exact complex would multiply the numeric tower
+    // by N. Real-only inputs with imaginary part 0 collapse to a
+    // real value so `(real? 3+0i)` is #t.
+    if (body.ends_with('i') || body.ends_with('I')) && radix == 10 {
+        if let Some(value) = parse_rectangular_complex(body, num, bad)? {
+            return Ok(value);
+        }
+    }
+    if body.contains('@') && radix == 10 {
+        if let Some(value) = parse_polar_complex(body, num, bad)? {
+            return Ok(value);
+        }
     }
 
     // Exact rational: a/b.
@@ -450,6 +452,176 @@ fn parse_number(num: &NumberLexeme, span: Span) -> Result<Value, ParseError> {
         return Ok(Value::Float(bigint_to_f64(&big)));
     }
     Ok(promote_bigint(big))
+}
+
+/// Parse a rectangular complex lexeme `<real>±<imag>i`. The whole
+/// body must end with `i`/`I`. Returns `Ok(None)` if the body doesn't
+/// fit the rectangular shape so the caller can fall through.
+fn parse_rectangular_complex(
+    body: &str,
+    num: &NumberLexeme,
+    bad: impl Fn() -> ParseError + Copy,
+) -> Result<Option<Value>, ParseError> {
+    let inner = &body[..body.len() - 1];
+    // Bare `+i` / `-i`: real=0, imag=±1.
+    match inner {
+        "+" => return Ok(Some(Value::Complex(Rc::new((0.0, 1.0))))),
+        "-" => return Ok(Some(Value::Complex(Rc::new((0.0, -1.0))))),
+        "" => return Err(bad()),
+        _ => {}
+    }
+    // Find the splitter sign — `+` or `-` not immediately preceded
+    // by an exponent marker.
+    let bytes = inner.as_bytes();
+    let mut split: Option<usize> = None;
+    let mut i = 1;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if (c == b'+' || c == b'-') && !is_exponent_marker(bytes[i - 1]) {
+            split = Some(i);
+        }
+        i += 1;
+    }
+    let Some(at) = split else {
+        // Entirely imaginary, e.g. `5i`, `1.5i`, `3/4i`.
+        let im = real_str_to_f64(inner, bad)?;
+        return Ok(Some(Value::Complex(Rc::new((0.0, im)))));
+    };
+    let (real_str, imag_str) = inner.split_at(at);
+    let imag_str = match imag_str {
+        "+" => "+1",
+        "-" => "-1",
+        s => s,
+    };
+    let real_value = real_str_to_value(real_str, num, bad)?;
+    let imag_value = real_str_to_value(imag_str, num, bad)?;
+    let imag_is_exact = is_exact(&imag_value);
+    let imag_is_zero = is_numerically_zero(&imag_value);
+    if imag_is_zero && imag_is_exact {
+        // Exact-zero imaginary part: collapse to the real value.
+        return Ok(Some(real_value));
+    }
+    let re_f = to_f64(&real_value);
+    let im_f = to_f64(&imag_value);
+    Ok(Some(Value::Complex(Rc::new((re_f, im_f)))))
+}
+
+fn parse_polar_complex(
+    body: &str,
+    _num: &NumberLexeme,
+    bad: impl Fn() -> ParseError + Copy,
+) -> Result<Option<Value>, ParseError> {
+    let Some(at) = body.find('@') else {
+        return Ok(None);
+    };
+    let (mag_s, ang_s) = body.split_at(at);
+    let ang_s = &ang_s[1..];
+    let mag = real_str_to_f64(mag_s, bad)?;
+    let ang = real_str_to_f64(ang_s, bad)?;
+    let re = mag * ang.cos();
+    let im = mag * ang.sin();
+    Ok(Some(Value::Complex(Rc::new((re, im)))))
+}
+
+/// Parse a real-part substring of a complex literal as a Value,
+/// preserving exactness when possible (integers and rationals stay
+/// exact; decimal/exponent forms become Float).
+fn real_str_to_value(
+    s: &str,
+    num: &NumberLexeme,
+    bad: impl Fn() -> ParseError + Copy,
+) -> Result<Value, ParseError> {
+    if s.is_empty() {
+        return Err(bad());
+    }
+    let lower = s.to_ascii_lowercase();
+    match lower.as_str() {
+        "+inf.0" => return Ok(Value::Float(f64::INFINITY)),
+        "-inf.0" => return Ok(Value::Float(f64::NEG_INFINITY)),
+        "+nan.0" | "-nan.0" => return Ok(Value::Float(f64::NAN)),
+        _ => {}
+    }
+    if let Some(slash) = s.find('/') {
+        let (n_str, d_str_with_slash) = s.split_at(slash);
+        let d_str = &d_str_with_slash[1..];
+        let n = <BigInt as NumTrait>::from_str_radix(n_str, 10).map_err(|_| bad())?;
+        let d = <BigInt as NumTrait>::from_str_radix(d_str, 10).map_err(|_| bad())?;
+        if d.is_zero() {
+            return Err(bad());
+        }
+        let r = BigRational::new(n, d);
+        if matches!(num.exactness, Exactness::Inexact) {
+            return Ok(Value::Float(r.to_f64().unwrap_or(f64::NAN)));
+        }
+        return Ok(normalize_rational(r));
+    }
+    let exp_chars = ['s', 'S', 'f', 'F', 'd', 'D', 'l', 'L'];
+    let has_marker = s.contains('.') || s.chars().any(|c| c == 'e' || c == 'E' || exp_chars.contains(&c));
+    if has_marker {
+        let normalised: String = s
+            .chars()
+            .map(|c| if exp_chars.contains(&c) { 'e' } else { c })
+            .collect();
+        let f: f64 = normalised.parse().map_err(|_| bad())?;
+        return Ok(Value::Float(f));
+    }
+    // Pure integer.
+    if let Ok(n) = i64::from_str_radix(s, 10) {
+        if matches!(num.exactness, Exactness::Inexact) {
+            #[allow(clippy::cast_precision_loss)]
+            return Ok(Value::Float(n as f64));
+        }
+        return Ok(Value::Int(n));
+    }
+    let big = <BigInt as NumTrait>::from_str_radix(s, 10).map_err(|_| bad())?;
+    if matches!(num.exactness, Exactness::Inexact) {
+        return Ok(Value::Float(big.to_f64().unwrap_or(f64::NAN)));
+    }
+    Ok(promote_bigint(big))
+}
+
+fn real_str_to_f64(
+    s: &str,
+    bad: impl Fn() -> ParseError + Copy,
+) -> Result<f64, ParseError> {
+    let dummy = NumberLexeme {
+        radix: 10,
+        exactness: Exactness::Inexact,
+        body: String::new(),
+    };
+    Ok(to_f64(&real_str_to_value(s, &dummy, bad)?))
+}
+
+fn is_exponent_marker(b: u8) -> bool {
+    matches!(
+        b,
+        b'e' | b'E' | b's' | b'S' | b'f' | b'F' | b'd' | b'D' | b'l' | b'L'
+    )
+}
+
+fn is_exact(v: &Value) -> bool {
+    matches!(v, Value::Int(_) | Value::BigInt(_) | Value::Rational(_))
+}
+
+fn is_numerically_zero(v: &Value) -> bool {
+    match v {
+        Value::Int(0) => true,
+        Value::BigInt(b) => b.is_zero(),
+        Value::Rational(r) => r.numer().is_zero(),
+        Value::Float(f) => *f == 0.0,
+        _ => false,
+    }
+}
+
+fn to_f64(v: &Value) -> f64 {
+    match v {
+        #[allow(clippy::cast_precision_loss)]
+        Value::Int(n) => *n as f64,
+        Value::BigInt(b) => b.to_f64().unwrap_or(f64::NAN),
+        Value::Rational(r) => r.to_f64().unwrap_or(f64::NAN),
+        Value::Float(f) => *f,
+        _ => f64::NAN,
+    }
 }
 
 /// Normalize: rationals with denominator 1 collapse to integers.

@@ -81,6 +81,8 @@ enum Num {
     Big(BigInt),
     Rat(BigRational),
     Float(f64),
+    /// Inexact complex with Cartesian (re, im).
+    Complex(f64, f64),
 }
 
 impl Num {
@@ -90,6 +92,7 @@ impl Num {
             Value::BigInt(b) => Ok(Self::Big((**b).clone())),
             Value::Rational(r) => Ok(Self::Rat((**r).clone())),
             Value::Float(f) => Ok(Self::Float(*f)),
+            Value::Complex(c) => Ok(Self::Complex(c.0, c.1)),
             other => Err(RuntimeError::Type {
                 expected: "number".into(),
                 got: other.type_name().into(),
@@ -103,6 +106,13 @@ impl Num {
             Self::Big(b) => bigint_to_value(b),
             Self::Rat(r) => rational_to_value(r),
             Self::Float(f) => Value::Float(f),
+            Self::Complex(re, im) => {
+                if im == 0.0 {
+                    Value::Float(re)
+                } else {
+                    Value::Complex(Rc::new((re, im)))
+                }
+            }
         }
     }
 
@@ -113,11 +123,25 @@ impl Num {
             Self::Big(b) => b.to_f64().unwrap_or(f64::NAN),
             Self::Rat(r) => r.to_f64().unwrap_or(f64::NAN),
             Self::Float(f) => *f,
+            Self::Complex(re, _) => *re,
         }
     }
 
     fn is_inexact(&self) -> bool {
-        matches!(self, Self::Float(_))
+        matches!(self, Self::Float(_) | Self::Complex(_, _))
+    }
+
+    fn is_complex(&self) -> bool {
+        matches!(self, Self::Complex(_, _))
+    }
+
+    /// (re, im) view, with the imaginary part 0 for non-complex
+    /// numbers.
+    fn to_complex(&self) -> (f64, f64) {
+        match self {
+            Self::Complex(re, im) => (*re, *im),
+            _ => (self.to_f64(), 0.0),
+        }
     }
 
     /// Promote an exact number to a common exact level.
@@ -126,7 +150,7 @@ impl Num {
             Self::Int(n) => BigRational::from_i64(*n).expect("i64 to BigRational"),
             Self::Big(b) => BigRational::from_integer(b.clone()),
             Self::Rat(r) => r.clone(),
-            Self::Float(_) => unreachable!("to_rational on inexact"),
+            Self::Float(_) | Self::Complex(_, _) => unreachable!("to_rational on inexact"),
         }
     }
 }
@@ -134,6 +158,22 @@ impl Num {
 /// Detect inexact (Float) numeric arguments for R7RS contagion rules.
 fn is_value_inexact(v: &Value) -> bool {
     matches!(v, Value::Float(_))
+}
+
+/// Complex square root via Cartesian form. Follows the principal
+/// branch — real part is non-negative; the imaginary part takes the
+/// sign of the input imag (so √(-1) = +i, √(0-0i) = 0).
+fn complex_sqrt(re: f64, im: f64) -> (f64, f64) {
+    if im == 0.0 {
+        if re >= 0.0 {
+            return (re.sqrt(), 0.0);
+        }
+        return (0.0, (-re).sqrt());
+    }
+    let r = (re * re + im * im).sqrt();
+    let s = ((r + re) / 2.0).sqrt();
+    let t = ((r - re) / 2.0).sqrt();
+    if im >= 0.0 { (s, t) } else { (s, -t) }
 }
 
 /// Format a `BigInt` in a non-decimal radix for `number->string`.
@@ -268,6 +308,11 @@ fn rational_to_value(r: BigRational) -> Value {
 // Arithmetic combinators on Num that follow R7RS promotion.
 
 fn num_add(a: Num, b: Num) -> Num {
+    if a.is_complex() || b.is_complex() {
+        let (ax, ay) = a.to_complex();
+        let (bx, by) = b.to_complex();
+        return Num::Complex(ax + bx, ay + by);
+    }
     if a.is_inexact() || b.is_inexact() {
         return Num::Float(a.to_f64() + b.to_f64());
     }
@@ -281,6 +326,11 @@ fn num_add(a: Num, b: Num) -> Num {
 }
 
 fn num_sub(a: Num, b: Num) -> Num {
+    if a.is_complex() || b.is_complex() {
+        let (ax, ay) = a.to_complex();
+        let (bx, by) = b.to_complex();
+        return Num::Complex(ax - bx, ay - by);
+    }
     if a.is_inexact() || b.is_inexact() {
         return Num::Float(a.to_f64() - b.to_f64());
     }
@@ -294,6 +344,11 @@ fn num_sub(a: Num, b: Num) -> Num {
 }
 
 fn num_mul(a: Num, b: Num) -> Num {
+    if a.is_complex() || b.is_complex() {
+        let (ax, ay) = a.to_complex();
+        let (bx, by) = b.to_complex();
+        return Num::Complex(ax * bx - ay * by, ax * by + ay * bx);
+    }
     if a.is_inexact() || b.is_inexact() {
         return Num::Float(a.to_f64() * b.to_f64());
     }
@@ -307,6 +362,18 @@ fn num_mul(a: Num, b: Num) -> Num {
 }
 
 fn num_div(a: Num, b: Num) -> Result<Num, RuntimeError> {
+    if a.is_complex() || b.is_complex() {
+        let (ax, ay) = a.to_complex();
+        let (bx, by) = b.to_complex();
+        let denom = bx * bx + by * by;
+        if denom == 0.0 {
+            return Err(RuntimeError::DivisionByZero);
+        }
+        return Ok(Num::Complex(
+            (ax * bx + ay * by) / denom,
+            (ay * bx - ax * by) / denom,
+        ));
+    }
     if a.is_inexact() || b.is_inexact() {
         let bf = b.to_f64();
         if bf == 0.0 {
@@ -330,6 +397,7 @@ fn num_neg(a: Num) -> Num {
         Num::Big(b) => Num::Big(-b),
         Num::Rat(r) => Num::Rat(-r),
         Num::Float(f) => Num::Float(-f),
+        Num::Complex(re, im) => Num::Complex(-re, -im),
     }
 }
 
@@ -339,6 +407,7 @@ fn num_is_zero(n: &Num) -> bool {
         Num::Big(b) => b.is_zero(),
         Num::Rat(r) => r.is_zero(),
         Num::Float(f) => *f == 0.0,
+        Num::Complex(re, im) => *re == 0.0 && *im == 0.0,
     }
 }
 
@@ -375,10 +444,19 @@ fn value_to_bigint(v: &Value) -> Result<BigInt, RuntimeError> {
 /// a NaN (R7RS §6.2.6: NaN comparisons must yield `#f`); otherwise
 /// returns the `Ordering` of the mathematical values.
 fn num_cmp(a: &Num, b: &Num) -> Option<std::cmp::Ordering> {
+    // R7RS: ordering on complex is undefined unless both are real.
+    // Treat any non-zero imaginary part as incomparable, mirroring
+    // NaN's None result.
+    if a.is_complex() || b.is_complex() {
+        let (_, ay) = a.to_complex();
+        let (_, by) = b.to_complex();
+        if ay != 0.0 || by != 0.0 {
+            return None;
+        }
+        return a.to_f64().partial_cmp(&b.to_f64());
+    }
     if a.is_inexact() || b.is_inexact() {
-        let x = a.to_f64();
-        let y = b.to_f64();
-        return x.partial_cmp(&y);
+        return a.to_f64().partial_cmp(&b.to_f64());
     }
     Some(a.to_rational().cmp(&b.to_rational()))
 }
@@ -539,6 +617,14 @@ fn install_arithmetic(env: &EnvRef) {
             Num::Big(b) => Num::Big(b.abs()),
             Num::Rat(r) => Num::Rat(r.abs()),
             Num::Float(f) => Num::Float(f.abs()),
+            // R7RS abs requires a real argument; calling on complex
+            // is an error per §6.2.6. Surface that as a type error.
+            Num::Complex(_, _) => {
+                return Err(RuntimeError::Type {
+                    expected: "real".into(),
+                    got: "complex".into(),
+                });
+            }
         }
         .into_value())
     });
@@ -646,8 +732,15 @@ fn install_predicates(env: &EnvRef) {
         Ok(Value::Bool(is_integer_value(&a[0])))
     });
     define(env, "real?", Arity::Exact(1), |a| {
-        // In v1 (no complex), every number is real.
-        Ok(Value::Bool(a[0].is_number()))
+        // Our representation collapses exact-zero-imaginary complex
+        // values to real Floats/Ints already. A surviving Complex
+        // therefore carries an inexact imaginary part — R7RS reports
+        // such values as non-real (see chibi's `(real? -2.5+0.0i)`
+        // expecting #f).
+        Ok(Value::Bool(matches!(
+            &a[0],
+            Value::Int(_) | Value::BigInt(_) | Value::Rational(_) | Value::Float(_)
+        )))
     });
     define(env, "rational?", Arity::Exact(1), |a| {
         Ok(Value::Bool(
@@ -672,14 +765,14 @@ fn install_predicates(env: &EnvRef) {
     });
     define(env, "exact?", Arity::Exact(1), |a| match &a[0] {
         Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(true)),
-        Value::Float(_) => Ok(Value::Bool(false)),
+        Value::Float(_) | Value::Complex(_) => Ok(Value::Bool(false)),
         other => Err(RuntimeError::Type {
             expected: "number".into(),
             got: other.type_name().into(),
         }),
     });
     define(env, "inexact?", Arity::Exact(1), |a| match &a[0] {
-        Value::Float(_) => Ok(Value::Bool(true)),
+        Value::Float(_) | Value::Complex(_) => Ok(Value::Bool(true)),
         Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(false)),
         other => Err(RuntimeError::Type {
             expected: "number".into(),
@@ -1101,7 +1194,7 @@ fn install_misc(env: &EnvRef) {
                     Num::Rat(r) => r.pow(i32::try_from(exp_u32).map_err(|_| {
                         RuntimeError::Other("expt: exponent magnitude too large".into())
                     })?),
-                    Num::Float(_) => unreachable!(),
+                    Num::Float(_) | Num::Complex(_, _) => unreachable!(),
                 };
                 let one = BigRational::from_integer(BigInt::from(1));
                 let inv = one / pow_rat;
@@ -1116,7 +1209,7 @@ fn install_misc(env: &EnvRef) {
                 Num::Rat(r) => rational_to_value(r.pow(i32::try_from(exp_u32).map_err(|_| {
                     RuntimeError::Other("expt: exponent magnitude too large".into())
                 })?)),
-                Num::Float(_) => unreachable!(),
+                Num::Float(_) | Num::Complex(_, _) => unreachable!(),
             };
             return Ok(result);
         }
@@ -1223,9 +1316,8 @@ fn install_misc(env: &EnvRef) {
     // R7RS rationalize: best rational approximation within tolerance.
     // For v1 we punt: return the input as-is.
     define(env, "rationalize", Arity::Exact(2), |a| Ok(a[0].clone()));
-    // Complex-number ops: nscheme v1 doesn't have complex, so these
-    // operate on reals as if they were complex with imag=0.
     define(env, "magnitude", Arity::Exact(1), |a| match &a[0] {
+        Value::Complex(c) => Ok(Value::Float(c.0.hypot(c.1))),
         Value::Float(f) => Ok(Value::Float(f.abs())),
         Value::Int(n) => Ok(Value::Int(n.checked_abs().unwrap_or(i64::MAX))),
         Value::BigInt(b) => Ok(bigint_to_value(b.as_ref().clone().abs())),
@@ -1236,6 +1328,9 @@ fn install_misc(env: &EnvRef) {
         }),
     });
     define(env, "angle", Arity::Exact(1), |a| {
+        if let Value::Complex(c) = &a[0] {
+            return Ok(Value::Float(c.1.atan2(c.0)));
+        }
         let n = Num::from_value(&a[0])?;
         let f = n.to_f64();
         Ok(Value::Float(if f.is_sign_negative() {
@@ -1244,23 +1339,38 @@ fn install_misc(env: &EnvRef) {
             0.0
         }))
     });
-    define(env, "real-part", Arity::Exact(1), |a| {
-        if !a[0].is_number() {
-            return Err(RuntimeError::Type {
-                expected: "number".into(),
-                got: a[0].type_name().into(),
-            });
-        }
-        Ok(a[0].clone())
+    define(env, "real-part", Arity::Exact(1), |a| match &a[0] {
+        Value::Complex(c) => Ok(Value::Float(c.0)),
+        other if other.is_number() => Ok(other.clone()),
+        other => Err(RuntimeError::Type {
+            expected: "number".into(),
+            got: other.type_name().into(),
+        }),
     });
-    define(env, "imag-part", Arity::Exact(1), |a| {
-        if !a[0].is_number() {
-            return Err(RuntimeError::Type {
-                expected: "number".into(),
-                got: a[0].type_name().into(),
-            });
+    define(env, "imag-part", Arity::Exact(1), |a| match &a[0] {
+        Value::Complex(c) => Ok(Value::Float(c.1)),
+        other if other.is_number() => Ok(Value::Int(0)),
+        other => Err(RuntimeError::Type {
+            expected: "number".into(),
+            got: other.type_name().into(),
+        }),
+    });
+    define(env, "make-rectangular", Arity::Exact(2), |a| {
+        let re = Num::from_value(&a[0])?.to_f64();
+        let im_num = Num::from_value(&a[1])?;
+        // (make-rectangular x 0) → x, preserving exactness.
+        if num_is_zero(&im_num) && matches!(im_num, Num::Int(_) | Num::Big(_) | Num::Rat(_)) {
+            return Ok(a[0].clone());
         }
-        Ok(Value::Int(0))
+        let im = im_num.to_f64();
+        Ok(Value::Complex(Rc::new((re, im))))
+    });
+    define(env, "make-polar", Arity::Exact(2), |a| {
+        let mag = Num::from_value(&a[0])?.to_f64();
+        let ang = Num::from_value(&a[1])?.to_f64();
+        let re = mag * ang.cos();
+        let im = mag * ang.sin();
+        Ok(Value::Complex(Rc::new((re, im))))
     });
     define(env, "features", Arity::Exact(0), |_| {
         Ok(Value::list_from(
@@ -1507,7 +1617,39 @@ fn install_inexact(env: &EnvRef) {
     f64_unary!("tan", tan);
     f64_unary!("asin", asin);
     f64_unary!("acos", acos);
-    f64_unary!("sqrt", sqrt);
+    // sqrt is special: R7RS §6.2.6 requires it to be defined on the
+    // entire numeric tower, so sqrt of a negative real returns a
+    // complex value, and sqrt of a complex value follows the
+    // standard branch (positive real part, then non-negative imag
+    // when real part is zero).
+    define(env, "sqrt", Arity::Exact(1), |a| {
+        match &a[0] {
+            Value::Complex(c) => {
+                let (re, im) = (c.0, c.1);
+                Ok(Value::Complex(Rc::new(complex_sqrt(re, im))))
+            }
+            v if v.is_number() => {
+                // Exact integer perfect square stays exact.
+                if let Value::Int(n) = v
+                    && *n >= 0
+                {
+                    let f = (*n as f64).sqrt();
+                    #[allow(clippy::cast_possible_truncation)]
+                    let i = f as i64;
+                    if i * i == *n {
+                        return Ok(Value::Int(i));
+                    }
+                }
+                let f = Num::from_value(v)?.to_f64();
+                if f.is_sign_negative() {
+                    let (re, im) = complex_sqrt(f, 0.0);
+                    return Ok(Value::Complex(Rc::new((re, im))));
+                }
+                Ok(Value::Float(f.sqrt()))
+            }
+            other => Err(type_err("number", other)),
+        }
+    });
     // log: (log z) or (log z base). With one arg, natural log.
     define(env, "log", Arity::Range { min: 1, max: 2 }, |a| {
         let x = Num::from_value(&a[0])?.to_f64();
@@ -1531,16 +1673,19 @@ fn install_inexact(env: &EnvRef) {
     define(env, "finite?", Arity::Exact(1), |a| match &a[0] {
         Value::Float(f) => Ok(Value::Bool(f.is_finite())),
         Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(true)),
+        Value::Complex(c) => Ok(Value::Bool(c.0.is_finite() && c.1.is_finite())),
         other => Err(type_err("number", other)),
     });
     define(env, "infinite?", Arity::Exact(1), |a| match &a[0] {
         Value::Float(f) => Ok(Value::Bool(f.is_infinite())),
         Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(false)),
+        Value::Complex(c) => Ok(Value::Bool(c.0.is_infinite() || c.1.is_infinite())),
         other => Err(type_err("number", other)),
     });
     define(env, "nan?", Arity::Exact(1), |a| match &a[0] {
         Value::Float(f) => Ok(Value::Bool(f.is_nan())),
         Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(false)),
+        Value::Complex(c) => Ok(Value::Bool(c.0.is_nan() || c.1.is_nan())),
         other => Err(type_err("number", other)),
     });
     // floor / ceiling / truncate / round — return the same exactness
