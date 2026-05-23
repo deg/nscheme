@@ -131,6 +131,111 @@ impl Num {
     }
 }
 
+/// Detect inexact (Float) numeric arguments for R7RS contagion rules.
+fn is_value_inexact(v: &Value) -> bool {
+    matches!(v, Value::Float(_))
+}
+
+/// R7RS §6.6: digit-value returns the numeric value of any character
+/// in Unicode general category Nd (decimal digit). Each Nd block is
+/// ten consecutive codepoints starting at "digit zero" for some
+/// script. The table below covers the Unicode 15.x Nd ranges. We
+/// don't pull in a Unicode-tables crate just for this.
+fn unicode_digit_value(c: char) -> Option<u32> {
+    const DIGIT_ZEROS: &[u32] = &[
+        0x0030, // ASCII
+        0x0660, // Arabic-Indic
+        0x06F0, // Extended Arabic-Indic
+        0x07C0, // NKo
+        0x0966, // Devanagari
+        0x09E6, // Bengali
+        0x0A66, // Gurmukhi
+        0x0AE6, // Gujarati
+        0x0B66, // Oriya
+        0x0BE6, // Tamil
+        0x0C66, // Telugu
+        0x0CE6, // Kannada
+        0x0D66, // Malayalam
+        0x0DE6, // Sinhala Lith
+        0x0E50, // Thai
+        0x0ED0, // Lao
+        0x0F20, // Tibetan
+        0x1040, // Myanmar
+        0x1090, // Myanmar Shan
+        0x17E0, // Khmer
+        0x1810, // Mongolian
+        0x1946, // Limbu
+        0x19D0, // New Tai Lue
+        0x1A80, // Tai Tham Hora
+        0x1A90, // Tai Tham Tham
+        0x1B50, // Balinese
+        0x1BB0, // Sundanese
+        0x1C40, // Lepcha
+        0x1C50, // Ol Chiki
+        0xA620, // Vai
+        0xA8D0, // Saurashtra
+        0xA900, // Kayah Li
+        0xA9D0, // Javanese
+        0xA9F0, // Myanmar Tai Laing
+        0xAA50, // Cham
+        0xABF0, // Meetei Mayek
+        0xFF10, // Fullwidth
+        0x104A0,  // Osmanya
+        0x10D30,  // Hanifi Rohingya
+        0x11066,  // Brahmi
+        0x110F0,  // Sora Sompeng
+        0x11136,  // Chakma
+        0x111D0,  // Sharada
+        0x112F0,  // Khudawadi
+        0x11450,  // Newa
+        0x114D0,  // Tirhuta
+        0x11650,  // Modi
+        0x116C0,  // Takri
+        0x11730,  // Ahom
+        0x118E0,  // Warang Citi
+        0x11950,  // Dives Akuru
+        0x11C50,  // Bhaiksuki
+        0x11D50,  // Masaram Gondi
+        0x11DA0,  // Gunjala Gondi
+        0x11F50,  // Kawi
+        0x16A60,  // Mro
+        0x16AC0,  // Tangsa
+        0x16B50,  // Pahawh Hmong
+        0x1D7CE,  // Mathematical Bold
+        0x1D7D8,  // Mathematical Double-Struck
+        0x1D7E2,  // Mathematical Sans-Serif
+        0x1D7EC,  // Mathematical Sans-Serif Bold
+        0x1D7F6,  // Mathematical Monospace
+        0x1E140,  // Nyiakeng Puachue Hmong
+        0x1E2F0,  // Wancho
+        0x1E4F0,  // Nag Mundari
+        0x1E950,  // Adlam
+        0x1FBF0,  // Segmented (Mathematical) Digits
+    ];
+    let cp = c as u32;
+    for &z in DIGIT_ZEROS {
+        if cp >= z && cp < z + 10 {
+            return Some(cp - z);
+        }
+    }
+    None
+}
+
+/// Convert an exact integer/rational `Value` to its inexact (Float)
+/// counterpart when contagion requires it; leave Floats unchanged.
+fn maybe_inexact(v: Value, inexact: bool) -> Value {
+    if !inexact {
+        return v;
+    }
+    match &v {
+        #[allow(clippy::cast_precision_loss)]
+        Value::Int(n) => Value::Float(*n as f64),
+        Value::BigInt(b) => Value::Float(b.to_f64().unwrap_or(f64::NAN)),
+        Value::Rational(r) => Value::Float(r.to_f64().unwrap_or(f64::NAN)),
+        _ => v,
+    }
+}
+
 /// Collapse a `BigInt` back to `Int` if it fits.
 fn bigint_to_value(b: BigInt) -> Value {
     if let Some(n) = b.to_i64() {
@@ -316,81 +421,90 @@ fn install_arithmetic(env: &EnvRef) {
         Ok(acc.into_value())
     });
     define(env, "quotient", Arity::Exact(2), |args| {
+        let inexact = is_value_inexact(&args[0]) || is_value_inexact(&args[1]);
         let a = value_to_bigint(&args[0])?;
         let b = value_to_bigint(&args[1])?;
         if b.is_zero() {
             return Err(RuntimeError::DivisionByZero);
         }
         // R7RS quotient: truncation toward zero.
-        Ok(bigint_to_value(a / b))
+        Ok(maybe_inexact(bigint_to_value(a / b), inexact))
     });
     define(env, "remainder", Arity::Exact(2), |args| {
+        let inexact = is_value_inexact(&args[0]) || is_value_inexact(&args[1]);
         let a = value_to_bigint(&args[0])?;
         let b = value_to_bigint(&args[1])?;
         if b.is_zero() {
             return Err(RuntimeError::DivisionByZero);
         }
         // R7RS remainder: same sign as dividend.
-        Ok(bigint_to_value(a % b))
+        Ok(maybe_inexact(bigint_to_value(a % b), inexact))
     });
     define(env, "truncate-quotient", Arity::Exact(2), |args| {
+        let inexact = is_value_inexact(&args[0]) || is_value_inexact(&args[1]);
         let a = value_to_bigint(&args[0])?;
         let b = value_to_bigint(&args[1])?;
         if b.is_zero() {
             return Err(RuntimeError::DivisionByZero);
         }
-        Ok(bigint_to_value(a / b))
+        Ok(maybe_inexact(bigint_to_value(a / b), inexact))
     });
     define(env, "truncate-remainder", Arity::Exact(2), |args| {
+        let inexact = is_value_inexact(&args[0]) || is_value_inexact(&args[1]);
         let a = value_to_bigint(&args[0])?;
         let b = value_to_bigint(&args[1])?;
         if b.is_zero() {
             return Err(RuntimeError::DivisionByZero);
         }
-        Ok(bigint_to_value(a % b))
+        Ok(maybe_inexact(bigint_to_value(a % b), inexact))
     });
     define(env, "truncate/", Arity::Exact(2), |args| {
+        let inexact = is_value_inexact(&args[0]) || is_value_inexact(&args[1]);
         let a = value_to_bigint(&args[0])?;
         let b = value_to_bigint(&args[1])?;
         if b.is_zero() {
             return Err(RuntimeError::DivisionByZero);
         }
         Ok(Value::Values(Rc::new(vec![
-            bigint_to_value(&a / &b),
-            bigint_to_value(a % b),
+            maybe_inexact(bigint_to_value(&a / &b), inexact),
+            maybe_inexact(bigint_to_value(a % b), inexact),
         ])))
     });
     define(env, "floor-quotient", Arity::Exact(2), |args| {
         use num_integer::Integer;
+        let inexact = is_value_inexact(&args[0]) || is_value_inexact(&args[1]);
         let a = value_to_bigint(&args[0])?;
         let b = value_to_bigint(&args[1])?;
         if b.is_zero() {
             return Err(RuntimeError::DivisionByZero);
         }
-        Ok(bigint_to_value(a.div_floor(&b)))
+        Ok(maybe_inexact(bigint_to_value(a.div_floor(&b)), inexact))
     });
     define(env, "floor-remainder", Arity::Exact(2), |args| {
         use num_integer::Integer;
+        let inexact = is_value_inexact(&args[0]) || is_value_inexact(&args[1]);
         let a = value_to_bigint(&args[0])?;
         let b = value_to_bigint(&args[1])?;
         if b.is_zero() {
             return Err(RuntimeError::DivisionByZero);
         }
-        Ok(bigint_to_value(a.mod_floor(&b)))
+        Ok(maybe_inexact(bigint_to_value(a.mod_floor(&b)), inexact))
     });
     define(env, "floor/", Arity::Exact(2), |args| {
         use num_integer::Integer;
+        let inexact = is_value_inexact(&args[0]) || is_value_inexact(&args[1]);
         let a = value_to_bigint(&args[0])?;
         let b = value_to_bigint(&args[1])?;
         if b.is_zero() {
             return Err(RuntimeError::DivisionByZero);
         }
         Ok(Value::Values(Rc::new(vec![
-            bigint_to_value(a.div_floor(&b)),
-            bigint_to_value(a.mod_floor(&b)),
+            maybe_inexact(bigint_to_value(a.div_floor(&b)), inexact),
+            maybe_inexact(bigint_to_value(a.mod_floor(&b)), inexact),
         ])))
     });
     define(env, "modulo", Arity::Exact(2), |args| {
+        let inexact = is_value_inexact(&args[0]) || is_value_inexact(&args[1]);
         let a = value_to_bigint(&args[0])?;
         let b = value_to_bigint(&args[1])?;
         if b.is_zero() {
@@ -403,7 +517,7 @@ fn install_arithmetic(env: &EnvRef) {
         } else {
             r
         };
-        Ok(bigint_to_value(m))
+        Ok(maybe_inexact(bigint_to_value(m), inexact))
     });
     define(env, "abs", Arity::Exact(1), |args| {
         let n = Num::from_value(&args[0])?;
@@ -420,21 +534,36 @@ fn install_arithmetic(env: &EnvRef) {
     });
     define(env, "min", Arity::AtLeast(1), |args| {
         let mut best = Num::from_value(&args[0])?;
+        let mut any_inexact = matches!(best, Num::Float(_));
         for a in &args[1..] {
             let n = Num::from_value(a)?;
+            if matches!(n, Num::Float(_)) {
+                any_inexact = true;
+            }
             if num_cmp(&n, &best) == Some(std::cmp::Ordering::Less) {
                 best = n;
             }
+        }
+        // R7RS: when any argument is inexact, the result is inexact.
+        if any_inexact && !matches!(best, Num::Float(_)) {
+            best = Num::Float(best.to_f64());
         }
         Ok(best.into_value())
     });
     define(env, "max", Arity::AtLeast(1), |args| {
         let mut best = Num::from_value(&args[0])?;
+        let mut any_inexact = matches!(best, Num::Float(_));
         for a in &args[1..] {
             let n = Num::from_value(a)?;
+            if matches!(n, Num::Float(_)) {
+                any_inexact = true;
+            }
             if num_cmp(&n, &best) == Some(std::cmp::Ordering::Greater) {
                 best = n;
             }
+        }
+        if any_inexact && !matches!(best, Num::Float(_)) {
+            best = Num::Float(best.to_f64());
         }
         Ok(best.into_value())
     });
@@ -926,6 +1055,13 @@ fn install_misc(env: &EnvRef) {
         Value::Int(n) => Ok(Value::Int(*n)),
         Value::BigInt(b) => Ok(Value::BigInt(b.clone())),
         Value::Rational(r) => Ok(bigint_to_value(r.numer().clone())),
+        Value::Float(f) => {
+            // R7RS: numerator/denominator of an inexact rational
+            // returns an inexact integer.
+            let r = BigRational::from_f64(*f)
+                .ok_or_else(|| RuntimeError::Other("numerator: not a finite number".into()))?;
+            Ok(Value::Float(r.numer().to_f64().unwrap_or(f64::NAN)))
+        }
         other => Err(RuntimeError::Type {
             expected: "rational".into(),
             got: other.type_name().into(),
@@ -984,22 +1120,24 @@ fn install_misc(env: &EnvRef) {
         if args.is_empty() {
             return Ok(Value::Int(0));
         }
+        let inexact = args.iter().any(is_value_inexact);
         let mut acc = value_to_bigint(&args[0])?;
         for a in &args[1..] {
             acc = acc.gcd(&value_to_bigint(a)?);
         }
-        Ok(bigint_to_value(acc.abs()))
+        Ok(maybe_inexact(bigint_to_value(acc.abs()), inexact))
     });
     define(env, "lcm", Arity::AtLeast(0), |args| {
         use num_integer::Integer;
         if args.is_empty() {
             return Ok(Value::Int(1));
         }
+        let inexact = args.iter().any(is_value_inexact);
         let mut acc = value_to_bigint(&args[0])?;
         for a in &args[1..] {
             acc = acc.lcm(&value_to_bigint(a)?);
         }
-        Ok(bigint_to_value(acc.abs()))
+        Ok(maybe_inexact(bigint_to_value(acc.abs()), inexact))
     });
     define(env, "exact-integer-sqrt", Arity::Exact(1), |a| {
         // Returns two values per R7RS — we return a packet.
@@ -1055,14 +1193,18 @@ fn install_misc(env: &EnvRef) {
         Ok(cur)
     });
     define(env, "digit-value", Arity::Exact(1), |a| match &a[0] {
-        Value::Char(c) => Ok(c
-            .to_digit(10)
+        Value::Char(c) => Ok(unicode_digit_value(*c)
             .map_or(Value::Bool(false), |d| Value::Int(i64::from(d)))),
         other => Err(type_err("char", other)),
     });
     define(env, "denominator", Arity::Exact(1), |a| match &a[0] {
         Value::Int(_) | Value::BigInt(_) => Ok(Value::Int(1)),
         Value::Rational(r) => Ok(bigint_to_value(r.denom().clone())),
+        Value::Float(f) => {
+            let r = BigRational::from_f64(*f)
+                .ok_or_else(|| RuntimeError::Other("denominator: not a finite number".into()))?;
+            Ok(Value::Float(r.denom().to_f64().unwrap_or(f64::NAN)))
+        }
         other => Err(RuntimeError::Type {
             expected: "rational".into(),
             got: other.type_name().into(),
@@ -1689,7 +1831,25 @@ fn install_strings(env: &EnvRef) {
         Ok(Value::string(out))
     });
     define(env, "string-copy", Arity::AtLeast(1), |a| match &a[0] {
-        Value::String(s) => Ok(Value::string(s.borrow().clone())),
+        Value::String(s) => {
+            let chars: Vec<char> = s.borrow().chars().collect();
+            let start = if a.len() > 1 {
+                value_to_usize(&a[1], "string-copy")?
+            } else {
+                0
+            };
+            let end = if a.len() > 2 {
+                value_to_usize(&a[2], "string-copy")?
+            } else {
+                chars.len()
+            };
+            if start > end || end > chars.len() {
+                return Err(RuntimeError::Other(
+                    "string-copy: range out of bounds".into(),
+                ));
+            }
+            Ok(Value::string(chars[start..end].iter().collect::<String>()))
+        }
         other => Err(type_err("string", other)),
     });
     define(env, "string-upcase", Arity::Exact(1), |a| match &a[0] {
@@ -1708,15 +1868,48 @@ fn install_strings(env: &EnvRef) {
     });
     define(env, "string->vector", Arity::AtLeast(1), |a| match &a[0] {
         Value::String(s) => {
-            let chars: Vec<Value> = s.borrow().chars().map(Value::Char).collect();
-            Ok(Value::vector(chars))
+            let all: Vec<char> = s.borrow().chars().collect();
+            let start = if a.len() > 1 {
+                value_to_usize(&a[1], "string->vector")?
+            } else {
+                0
+            };
+            let end = if a.len() > 2 {
+                value_to_usize(&a[2], "string->vector")?
+            } else {
+                all.len()
+            };
+            if start > end || end > all.len() {
+                return Err(RuntimeError::Other(
+                    "string->vector: range out of bounds".into(),
+                ));
+            }
+            Ok(Value::vector(
+                all[start..end].iter().copied().map(Value::Char).collect(),
+            ))
         }
         other => Err(type_err("string", other)),
     });
     define(env, "vector->string", Arity::AtLeast(1), |a| match &a[0] {
         Value::Vector(v) => {
+            let vec = v.borrow();
+            let start = if a.len() > 1 {
+                value_to_usize(&a[1], "vector->string")?
+            } else {
+                0
+            };
+            let end = if a.len() > 2 {
+                value_to_usize(&a[2], "vector->string")?
+            } else {
+                vec.len()
+            };
+            if start > end || end > vec.len() {
+                return Err(RuntimeError::Other(
+                    "vector->string: range out of bounds".into(),
+                ));
+            }
             let mut s = String::new();
-            for item in v.borrow().iter() {
+            for item in &vec[start..end] {
                 let Value::Char(c) = item else {
                     return Err(type_err("vector of chars", item));
                 };
@@ -2051,7 +2244,25 @@ fn install_vectors(env: &EnvRef) {
         Ok(Value::Unspecified)
     });
     define(env, "vector-copy", Arity::AtLeast(1), |a| match &a[0] {
-        Value::Vector(v) => Ok(Value::vector(v.borrow().clone())),
+        Value::Vector(v) => {
+            let vec = v.borrow();
+            let start = if a.len() > 1 {
+                value_to_usize(&a[1], "vector-copy")?
+            } else {
+                0
+            };
+            let end = if a.len() > 2 {
+                value_to_usize(&a[2], "vector-copy")?
+            } else {
+                vec.len()
+            };
+            if start > end || end > vec.len() {
+                return Err(RuntimeError::Other(
+                    "vector-copy: range out of bounds".into(),
+                ));
+            }
+            Ok(Value::vector(vec[start..end].to_vec()))
+        }
         other => Err(type_err("vector", other)),
     });
     define(env, "vector-copy!", Arity::AtLeast(3), |a| {
@@ -2195,14 +2406,49 @@ fn install_bytevectors(env: &EnvRef) {
     });
     define(env, "utf8->string", Arity::AtLeast(1), |a| match &a[0] {
         Value::Bytevector(b) => {
-            let s = String::from_utf8(b.borrow().clone())
+            let bytes = b.borrow();
+            let start = if a.len() > 1 {
+                value_to_usize(&a[1], "utf8->string")?
+            } else {
+                0
+            };
+            let end = if a.len() > 2 {
+                value_to_usize(&a[2], "utf8->string")?
+            } else {
+                bytes.len()
+            };
+            if start > end || end > bytes.len() {
+                return Err(RuntimeError::Other(
+                    "utf8->string: range out of bounds".into(),
+                ));
+            }
+            let s = String::from_utf8(bytes[start..end].to_vec())
                 .map_err(|e| RuntimeError::Other(format!("utf8->string: {e}")))?;
             Ok(Value::string(s))
         }
         other => Err(type_err("bytevector", other)),
     });
     define(env, "string->utf8", Arity::AtLeast(1), |a| match &a[0] {
-        Value::String(s) => Ok(Value::bytevector(s.borrow().as_bytes().to_vec())),
+        Value::String(s) => {
+            let chars: Vec<char> = s.borrow().chars().collect();
+            let start = if a.len() > 1 {
+                value_to_usize(&a[1], "string->utf8")?
+            } else {
+                0
+            };
+            let end = if a.len() > 2 {
+                value_to_usize(&a[2], "string->utf8")?
+            } else {
+                chars.len()
+            };
+            if start > end || end > chars.len() {
+                return Err(RuntimeError::Other(
+                    "string->utf8: range out of bounds".into(),
+                ));
+            }
+            let sub: String = chars[start..end].iter().collect();
+            Ok(Value::bytevector(sub.into_bytes()))
+        }
         other => Err(type_err("string", other)),
     });
     define(env, "bytevector-copy", Arity::AtLeast(1), |a| match &a[0] {
