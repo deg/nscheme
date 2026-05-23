@@ -279,7 +279,8 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
         | Value::Port(_)
         | Value::Macro(_)
         | Value::ErrorObject(_)
-        | Value::Promise(_) => return Ok(Step::Return(expr)),
+        | Value::Promise(_)
+        | Value::Values(_) => return Ok(Step::Return(expr)),
         Value::Symbol(sym) => {
             let v = env.lookup(sym).ok_or_else(|| {
                 EvalError::Runtime(RuntimeError::Undefined(sym.name().to_string()))
@@ -329,6 +330,8 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
             }
             "apply" => return step_apply_form(tail, env, frames),
             "delay" => return step_delay(tail, env),
+            "let-values" => return step_let_values(tail, env, frames, false),
+            "let*-values" => return step_let_values(tail, env, frames, true),
             "raise" => return step_raise_with_frames(tail, env, false, frames),
             "raise-continuable" => return step_raise_with_frames(tail, env, true, frames),
             "with-exception-handler" => {
@@ -560,6 +563,63 @@ fn step_apply_form(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<
         env: env.clone(),
     });
     Ok(Step::Eval(proc_expr, env))
+}
+
+/// `(let-values (((vars...) expr) ...) body...)` /
+/// `(let*-values ...)`. Desugars to nested
+/// `call-with-values + lambda`. `sequential = true` for `let*-values`
+/// just means each binding sees the bindings before it, which our
+/// nested-lambda desugaring gets for free.
+fn step_let_values(
+    tail: Value,
+    env: EnvRef,
+    frames: &mut Vec<Frame>,
+    sequential: bool,
+) -> Result<Step, EvalError> {
+    let _ = sequential; // both forms use the same nested desugaring
+    let (bindings_form, body_tail) = tail
+        .as_pair()
+        .ok_or_else(|| EvalError::malformed("let-values", "expected bindings and body"))?;
+    let bindings = collect_list(&bindings_form)
+        .map_err(|()| EvalError::malformed("let-values", "bindings must be a proper list"))?;
+    let body = collect_list(&body_tail)
+        .map_err(|()| EvalError::malformed("let-values", "body must be a proper list"))?;
+    if body.is_empty() {
+        return Err(EvalError::malformed("let-values", "body must not be empty"));
+    }
+
+    let mksym = |s: &str| Value::Symbol(Symbol::intern(s));
+    let body_expr = if body.len() == 1 {
+        body.into_iter().next().unwrap()
+    } else {
+        let mut begin = vec![mksym("begin")];
+        begin.extend(body);
+        Value::list_from(begin)
+    };
+
+    // Build nested call-with-values, innermost first.
+    let mut acc = body_expr;
+    for binding in bindings.into_iter().rev() {
+        // Each binding is ((vars...) producer-expr)
+        let parts = collect_list(&binding)
+            .map_err(|()| EvalError::malformed("let-values", "binding must be a list"))?;
+        if parts.len() != 2 {
+            return Err(EvalError::malformed(
+                "let-values",
+                "binding must be (formals producer)",
+            ));
+        }
+        let formals = parts[0].clone();
+        let producer_expr = parts[1].clone();
+        // (lambda () producer-expr)
+        let producer_thunk = Value::list_from([mksym("lambda"), Value::Null, producer_expr]);
+        // (lambda formals acc)
+        let consumer = Value::list_from([mksym("lambda"), formals, acc]);
+        // (call-with-values producer-thunk consumer)
+        acc = Value::list_from([mksym("call-with-values"), producer_thunk, consumer]);
+    }
+    let _ = frames;
+    Ok(Step::Eval(acc, env))
 }
 
 /// `(delay expr)` — construct a promise that, when forced, will

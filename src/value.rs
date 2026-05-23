@@ -361,6 +361,11 @@ pub enum Value {
     /// `force` runs the expression once and caches the result; later
     /// `force` calls return the cached value.
     Promise(Rc<RefCell<PromiseState>>),
+    /// A multiple-value packet, R7RS §6.10. Produced by `(values v
+    /// ...)` with non-1 arity; consumed by `call-with-values` and the
+    /// `let-values` family. R7RS's `(values v)` collapses to just `v`,
+    /// so a singleton packet is never observed.
+    Values(Rc<Vec<Value>>),
 }
 
 /// State of a [`Value::Promise`]. Pending promises remember their
@@ -524,6 +529,7 @@ impl Value {
             Self::Macro(_) => "macro",
             Self::ErrorObject(_) => "error-object",
             Self::Promise(_) => "promise",
+            Self::Values(_) => "values-packet",
         }
     }
 }
@@ -559,6 +565,7 @@ pub fn eq(a: &Value, b: &Value) -> bool {
         (Value::Macro(x), Value::Macro(y)) => Rc::ptr_eq(x, y),
         (Value::ErrorObject(x), Value::ErrorObject(y)) => Rc::ptr_eq(x, y),
         (Value::Promise(x), Value::Promise(y)) => Rc::ptr_eq(x, y),
+        (Value::Values(x), Value::Values(y)) => Rc::ptr_eq(x, y),
         _ => false,
     }
 }
@@ -725,6 +732,13 @@ fn write_value(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt::Res
             f.write_str(">")
         }
         Value::Promise(_) => f.write_str("#<promise>"),
+        Value::Values(vs) => {
+            f.write_str("#<values")?;
+            for v in vs.iter() {
+                write!(f, " {v:?}")?;
+            }
+            f.write_str(">")
+        }
     }
 }
 

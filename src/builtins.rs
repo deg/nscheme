@@ -843,6 +843,21 @@ fn install_misc(env: &EnvRef) {
     // It does NOT itself raise — the user calls (raise (error "msg" ...))
     // or wraps with our convenience `error/raise` (the bootstrap defines
     // an `error` that raises directly).
+    define(env, "values", Arity::AtLeast(0), |args| match args.len() {
+        // R7RS: (values v) ≡ v (a single value, not a singleton packet).
+        1 => Ok(args[0].clone()),
+        _ => Ok(Value::Values(Rc::new(args.to_vec()))),
+    });
+    define(env, "values-packet?", Arity::Exact(1), |a| {
+        Ok(Value::Bool(matches!(a[0], Value::Values(_))))
+    });
+    define(env, "values->list", Arity::Exact(1), |a| match &a[0] {
+        Value::Values(vs) => Ok(Value::list_from(vs.iter().cloned())),
+        // Single value: wrap in a one-element list, so the bootstrap
+        // call-with-values can apply consumer to any producer result
+        // uniformly.
+        other => Ok(Value::list_from([other.clone()])),
+    });
     define(env, "promise?", Arity::Exact(1), |a| {
         Ok(Value::Bool(matches!(a[0], Value::Promise(_))))
     });
@@ -1466,6 +1481,13 @@ const BOOTSTRAP: &str = r"
 ;; (error msg arg ...) — build an error-object and raise it.
 (define (error msg . irritants)
   (raise (apply make-error-object msg irritants)))
+
+;; (call-with-values producer consumer) — calls (producer), then
+;; applies consumer to whatever values producer returned. The producer
+;; may use `values` to return zero, one, or many values; values->list
+;; normalises both cases into a list that apply can spread.
+(define (call-with-values producer consumer)
+  (apply consumer (values->list (producer))))
 ";
 
 // ---------------------------------------------------------------------
