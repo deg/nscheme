@@ -278,7 +278,8 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
         | Value::Procedure(_)
         | Value::Port(_)
         | Value::Macro(_)
-        | Value::ErrorObject(_) => return Ok(Step::Return(expr)),
+        | Value::ErrorObject(_)
+        | Value::Promise(_) => return Ok(Step::Return(expr)),
         Value::Symbol(sym) => {
             let v = env.lookup(sym).ok_or_else(|| {
                 EvalError::Runtime(RuntimeError::Undefined(sym.name().to_string()))
@@ -327,6 +328,7 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
                 return step_call_cc(tail, env, frames);
             }
             "apply" => return step_apply_form(tail, env, frames),
+            "delay" => return step_delay(tail, env),
             "raise" => return step_raise_with_frames(tail, env, false, frames),
             "raise-continuable" => return step_raise_with_frames(tail, env, true, frames),
             "with-exception-handler" => {
@@ -558,6 +560,26 @@ fn step_apply_form(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<
         env: env.clone(),
     });
     Ok(Step::Eval(proc_expr, env))
+}
+
+/// `(delay expr)` — construct a promise that, when forced, will
+/// evaluate `expr` in the current env (and cache the result).
+fn step_delay(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
+    let mut iter = ListIter::new(tail);
+    let expr = iter
+        .next()
+        .ok_or_else(|| EvalError::malformed("delay", "expected one operand"))??;
+    if iter.next().is_some() {
+        return Err(EvalError::malformed(
+            "delay",
+            "expected exactly one operand",
+        ));
+    }
+    let state = std::cell::RefCell::new(crate::value::PromiseState::Pending {
+        expr,
+        env: env.clone(),
+    });
+    Ok(Step::Return(Value::Promise(Rc::new(state))))
 }
 
 /// `(raise expr)` / `(raise-continuable expr)` — evaluate `expr`, then

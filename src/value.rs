@@ -356,6 +356,20 @@ pub enum Value {
     Macro(Rc<crate::macros::SyntaxRules>),
     /// An R7RS error object (`error`, `error-object?`, etc.).
     ErrorObject(Rc<ErrorObject>),
+    /// A delayed computation, R7RS §4.2.5. Until forced, the promise
+    /// holds an unevaluated expression and the env it was created in.
+    /// `force` runs the expression once and caches the result; later
+    /// `force` calls return the cached value.
+    Promise(Rc<RefCell<PromiseState>>),
+}
+
+/// State of a [`Value::Promise`]. Pending promises remember their
+/// suspended expression and defining env; once forced they collapse
+/// to the resulting value.
+#[derive(Debug)]
+pub enum PromiseState {
+    Pending { expr: Value, env: EnvRef },
+    Forced(Value),
 }
 
 /// Payload behind [`Value::ErrorObject`].
@@ -509,6 +523,7 @@ impl Value {
             Self::Port(_) => "port",
             Self::Macro(_) => "macro",
             Self::ErrorObject(_) => "error-object",
+            Self::Promise(_) => "promise",
         }
     }
 }
@@ -543,6 +558,7 @@ pub fn eq(a: &Value, b: &Value) -> bool {
         (Value::Port(x), Value::Port(y)) => Rc::ptr_eq(x, y),
         (Value::Macro(x), Value::Macro(y)) => Rc::ptr_eq(x, y),
         (Value::ErrorObject(x), Value::ErrorObject(y)) => Rc::ptr_eq(x, y),
+        (Value::Promise(x), Value::Promise(y)) => Rc::ptr_eq(x, y),
         _ => false,
     }
 }
@@ -708,6 +724,7 @@ fn write_value(v: &Value, f: &mut fmt::Formatter<'_>, display: bool) -> fmt::Res
             }
             f.write_str(">")
         }
+        Value::Promise(_) => f.write_str("#<promise>"),
     }
 }
 

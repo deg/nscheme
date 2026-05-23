@@ -34,6 +34,17 @@ pub struct Env {
     parent: Option<EnvRef>,
 }
 
+impl std::fmt::Debug for Env {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Don't recurse into bindings (Values may contain procedures
+        // closing over this env, which would loop). Just summarize.
+        f.debug_struct("Env")
+            .field("local_bindings", &self.frame.borrow().len())
+            .field("has_parent", &self.parent.is_some())
+            .finish()
+    }
+}
+
 impl Env {
     /// Create a fresh global (parent-less) environment.
     pub fn new_global() -> EnvRef {

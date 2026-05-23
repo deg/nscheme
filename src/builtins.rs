@@ -843,6 +843,52 @@ fn install_misc(env: &EnvRef) {
     // It does NOT itself raise — the user calls (raise (error "msg" ...))
     // or wraps with our convenience `error/raise` (the bootstrap defines
     // an `error` that raises directly).
+    define(env, "promise?", Arity::Exact(1), |a| {
+        Ok(Value::Bool(matches!(a[0], Value::Promise(_))))
+    });
+    define(env, "make-promise", Arity::Exact(1), |a| {
+        // (make-promise obj) builds an already-forced promise.
+        let state = std::cell::RefCell::new(crate::value::PromiseState::Forced(a[0].clone()));
+        Ok(Value::Promise(Rc::new(state)))
+    });
+    define(env, "force", Arity::Exact(1), |a| {
+        let mut cur = a[0].clone();
+        // R7RS: force resolves chains of promises, so (force (delay
+        // (delay 42))) returns 42, not a promise.
+        loop {
+            let Value::Promise(p) = &cur else {
+                return Ok(cur);
+            };
+            // Snapshot the state — if it's Forced, return; if
+            // Pending, evaluate and cache.
+            let snapshot = {
+                let borrowed = p.borrow();
+                match &*borrowed {
+                    crate::value::PromiseState::Forced(v) => Some(v.clone()),
+                    crate::value::PromiseState::Pending { .. } => None,
+                }
+            };
+            if let Some(v) = snapshot {
+                cur = v;
+                continue;
+            }
+            // Pending: evaluate. We need expr/env from the promise,
+            // but we can't hold borrow across eval (eval may
+            // re-enter and mutate). Take a clone first.
+            let (expr, env) = {
+                let borrowed = p.borrow();
+                if let crate::value::PromiseState::Pending { expr, env } = &*borrowed {
+                    (expr.clone(), env.clone())
+                } else {
+                    unreachable!()
+                }
+            };
+            let v = crate::eval::eval(expr, env)
+                .map_err(|e| RuntimeError::Other(format!("force: {e}")))?;
+            *p.borrow_mut() = crate::value::PromiseState::Forced(v.clone());
+            cur = v;
+        }
+    });
     define(env, "make-error-object", Arity::AtLeast(1), |args| {
         let msg = match &args[0] {
             Value::String(s) => s.borrow().clone(),
