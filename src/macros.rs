@@ -40,6 +40,35 @@ use crate::env::EnvRef;
 use crate::eval::EvalError;
 use crate::value::{Symbol, Value};
 
+/// A pattern-variable identifier. `name` is the bare symbol name;
+/// `scope` is the env-pointer of the `SyntaxRef` that introduced
+/// it (or `None` for a plain `Symbol`). Two identifiers with the
+/// same name but different scopes are distinct keys, so a macro's
+/// template-introduced `x` (SyntaxRef-wrapped) does not collide
+/// with the user's `x` (plain Symbol) that another macro
+/// substituted into the same template.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct VarKey {
+    name: Symbol,
+    scope: Option<usize>,
+}
+
+impl VarKey {
+    fn from_value(v: &Value) -> Option<Self> {
+        match v {
+            Value::Symbol(s) => Some(Self {
+                name: s.clone(),
+                scope: None,
+            }),
+            Value::SyntaxRef { name, env } => Some(Self {
+                name: name.clone(),
+                scope: Some(std::rc::Rc::as_ptr(env) as usize),
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// A compiled `(syntax-rules (LITERALS...) CLAUSES...)` form. R7RS
 /// also allows `(syntax-rules <ELLIPSIS-ID> (LITERALS...) CLAUSES...)`
 /// to rename the ellipsis marker; we store that here.
@@ -48,7 +77,13 @@ pub struct SyntaxRules {
     /// Name of the ellipsis marker for this macro. Defaults to `...`
     /// but can be any identifier via the renaming form.
     pub ellipsis: Symbol,
-    pub literals: HashSet<Symbol>,
+    /// The original literal identifiers from the `(literals)` list,
+    /// preserved with any hygiene marks. Pattern matching compares
+    /// inputs against these using R7RS's same-binding rule: a
+    /// literal matches when the input's identifier resolves to the
+    /// same binding (or both are unbound and have identical
+    /// hygiene marks).
+    pub literals: Vec<Value>,
     pub clauses: Vec<SyntaxClause>,
     /// Definition-site environment, used by `expand` to wrap free
     /// identifiers in the template so they resolve to their
@@ -87,13 +122,12 @@ pub fn parse_syntax_rules(form: &Value) -> Result<SyntaxRules, EvalError> {
     }
     let literals_list = collect_list(&parts[literals_idx])
         .ok_or_else(|| malformed("literals must be a proper list"))?;
-    let mut literals: HashSet<Symbol> = HashSet::new();
+    let mut literals: Vec<Value> = Vec::new();
     for lit in literals_list {
-        let s = lit
-            .as_identifier()
-            .ok_or_else(|| malformed("literal must be an identifier"))?
-            .clone();
-        literals.insert(s);
+        if lit.as_identifier().is_none() {
+            return Err(malformed("literal must be an identifier"));
+        }
+        literals.push(lit);
     }
     let mut clauses: Vec<SyntaxClause> = Vec::new();
     for clause in &parts[literals_idx + 1..] {
@@ -118,6 +152,20 @@ pub fn parse_syntax_rules(form: &Value) -> Result<SyntaxRules, EvalError> {
 /// Top-level expansion: walk the clauses, match the first one whose
 /// pattern fits, and instantiate its template.
 pub fn expand(rules: &SyntaxRules, call: &Value) -> Result<Value, EvalError> {
+    // R7RS §4.3.2: a literal listed in `(literals)` matches itself.
+    // When the ellipsis identifier itself is in the literals, the
+    // matcher and the expander both stop treating it as a
+    // repetition marker. Substitute a sentinel name that can never
+    // appear in user code.
+    let active_ellipsis = if rules
+        .literals
+        .iter()
+        .any(|l| l.as_identifier() == Some(&rules.ellipsis))
+    {
+        Symbol::intern("\u{0}__nscheme_disabled_ellipsis__\u{0}")
+    } else {
+        rules.ellipsis.clone()
+    };
     for clause in &rules.clauses {
         // R7RS §4.3.2: the first sub-pattern is conventionally the
         // macro keyword. Pattern matching against the macro name is
@@ -131,7 +179,7 @@ pub fn expand(rules: &SyntaxRules, call: &Value) -> Result<Value, EvalError> {
             &stripped_pattern,
             &stripped_call,
             &rules.literals,
-            &rules.ellipsis,
+            &active_ellipsis,
             &mut bindings,
         ) {
             // Determine template-introduced identifiers in binding
@@ -142,7 +190,7 @@ pub fn expand(rules: &SyntaxRules, call: &Value) -> Result<Value, EvalError> {
             // happen to also appear in a binding position in the
             // template.
             for v in bindings.0.keys() {
-                binders.remove(v);
+                binders.remove(&v.name);
             }
             let renames: HashMap<Symbol, Symbol> = binders
                 .into_iter()
@@ -152,7 +200,7 @@ pub fn expand(rules: &SyntaxRules, call: &Value) -> Result<Value, EvalError> {
                 &clause.template,
                 &bindings,
                 &renames,
-                &rules.ellipsis,
+                &active_ellipsis,
                 rules.def_env.as_ref(),
             );
         }
@@ -165,7 +213,7 @@ pub fn expand(rules: &SyntaxRules, call: &Value) -> Result<Value, EvalError> {
 // ---------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default)]
-struct Bindings(HashMap<Symbol, Match>);
+struct Bindings(HashMap<VarKey, Match>);
 
 #[derive(Debug, Clone)]
 enum Match {
@@ -178,20 +226,25 @@ enum Match {
 fn pattern_match(
     pattern: &Value,
     input: &Value,
-    literals: &HashSet<Symbol>,
+    literals: &[Value],
     ellipsis: &Symbol,
     bindings: &mut Bindings,
 ) -> bool {
     if let Some(s) = pattern.as_identifier() {
-        if literals.contains(s) {
-            // Literal — input must be the same identifier name.
-            return input.as_identifier().is_some_and(|i| i == s);
+        if literal_matches(pattern, literals) {
+            // R7RS §4.3.2: a literal matches when the input
+            // identifier resolves to the same binding as the
+            // literal — or, when both are unbound, when their
+            // hygiene marks agree.
+            return input_matches_literal(input, pattern);
         }
         if s.name() == "_" {
             // Wildcard.
             return true;
         }
-        bindings.0.insert(s.clone(), Match::Single(input.clone()));
+        if let Some(key) = VarKey::from_value(pattern) {
+            bindings.0.insert(key, Match::Single(input.clone()));
+        }
         return true;
     }
     match pattern {
@@ -205,47 +258,45 @@ fn pattern_match(
 fn match_list(
     pattern: &Value,
     input: &Value,
-    literals: &HashSet<Symbol>,
+    literals: &[Value],
     ellipsis: &Symbol,
     bindings: &mut Bindings,
 ) -> bool {
-    // Walk pattern looking for the ellipsis marker after some pattern
-    // element.
-    let elems = pattern_elems(pattern);
-    let (proper_pattern, dotted_tail) = elems;
+    let (proper_pattern, dotted_tail) = pattern_elems(pattern);
 
-    // Find the position of the ellipsis marker if any (must follow a
-    // sub-pattern).
+    // R7RS §4.3.2: a literal identifier matches itself in patterns,
+    // and that includes the ellipsis spelling — when the ellipsis
+    // identifier is listed in the literals, treat it as a regular
+    // literal rather than a repetition marker.
+    let ellipsis_is_literal = literals.iter().any(|l| l.as_identifier() == Some(ellipsis));
     let mut ellipsis_at: Option<usize> = None;
-    for (i, p) in proper_pattern.iter().enumerate() {
-        if is_named_ellipsis(p, ellipsis) && i > 0 {
-            ellipsis_at = Some(i - 1);
-            break;
+    if !ellipsis_is_literal {
+        for (i, p) in proper_pattern.iter().enumerate() {
+            if is_named_ellipsis(p, ellipsis) && i > 0 {
+                ellipsis_at = Some(i - 1);
+                break;
+            }
         }
     }
 
-    let input_list = collect_list(input);
-    if input_list.is_none() && !matches!(input, Value::Pair(_) | Value::Null) {
-        return false;
-    }
+    // Walk the input spine, collecting proper elements and recording
+    // any non-Null tail. Improper input gives the tail; proper input
+    // ends with Null.
+    let (input_items, input_tail) = collect_list_with_tail(input);
 
     if let Some(idx) = ellipsis_at {
-        // Pattern: [p0, ..., p_{idx-1}, p_idx, ELLIPSIS, p_{idx+2}, ..., p_{n-1}]
-        // The `p_idx ...` segment matches zero or more elements.
+        // Pattern: [p0, ..., p_{idx-1}, p_idx, ELLIPSIS, p_{idx+2}, ..., p_{n-1}] [. tail]
         let post_count = proper_pattern.len() - (idx + 2);
-        let Some(input_items) = collect_list(input) else {
-            return false;
-        };
         if input_items.len() < idx + post_count {
             return false;
         }
-        // Match prefix.
+        // Prefix.
         for (p, v) in proper_pattern[..idx].iter().zip(input_items.iter()) {
             if !pattern_match(p, v, literals, ellipsis, bindings) {
                 return false;
             }
         }
-        // Match the repeating segment.
+        // Repetition.
         let repeat_count = input_items.len() - idx - post_count;
         let mut multi: Vec<Bindings> = Vec::with_capacity(repeat_count);
         for v in &input_items[idx..idx + repeat_count] {
@@ -255,19 +306,7 @@ fn match_list(
             }
             multi.push(sub);
         }
-        // Merge multi into bindings.
         for var in collect_pattern_vars(&proper_pattern[idx], literals, ellipsis) {
-            let collected: Vec<Match> = multi
-                .iter()
-                .map(|b| b.0.get(&var).cloned().unwrap_or(Match::Single(Value::Null)))
-                .collect();
-            // Each Match in `collected` is a Single per repetition;
-            // store as Multi(per-rep-bindings).
-            // We store as Multi of Bindings (one per rep) so depth
-            // tracking is uniform.
-            let _ = collected;
-            // Build a fresh Multi(Vec<Bindings>) where each inner
-            // Bindings contains only `var`.
             let per_rep: Vec<Bindings> = multi
                 .iter()
                 .map(|b| {
@@ -280,7 +319,7 @@ fn match_list(
                 .collect();
             bindings.0.insert(var, Match::Multi(per_rep));
         }
-        // Match postfix.
+        // Postfix.
         for (p, v) in proper_pattern[idx + 2..]
             .iter()
             .zip(input_items[idx + repeat_count..].iter())
@@ -289,71 +328,59 @@ fn match_list(
                 return false;
             }
         }
-        // Match dotted tail if any.
-        if let Some(tail_pat) = dotted_tail {
-            // The remaining input tail is everything we didn't consume.
-            // But for proper-list inputs we've consumed everything already.
-            // Improper-list pattern matching against proper-list input is
-            // an error case — return false unless tail_pat matches Null.
-            return pattern_match(&tail_pat, &Value::Null, literals, ellipsis, bindings);
-        }
-        return true;
+        // Dotted tail.
+        return match dotted_tail {
+            Some(tail_pat) => pattern_match(&tail_pat, &input_tail, literals, ellipsis, bindings),
+            None => matches!(input_tail, Value::Null),
+        };
     }
 
-    // No ellipsis — straightforward element-by-element.
-    match input_list {
-        Some(input_items) => {
-            // No ellipsis: pattern and input must have matching length,
-            // including any dotted tail.
-            if let Some(_) = &dotted_tail {
-                // Pattern has improper tail. Take input_items first
-                // proper_pattern.len() items, then match tail against
-                // rest.
-                if input_items.len() < proper_pattern.len() {
-                    return false;
-                }
-                for (p, v) in proper_pattern.iter().zip(input_items.iter()) {
-                    if !pattern_match(p, v, literals, ellipsis, bindings) {
-                        return false;
-                    }
-                }
-                let rest_items = input_items[proper_pattern.len()..].to_vec();
-                let rest_tail = Value::list_from(rest_items);
-                return pattern_match(
-                    dotted_tail.as_ref().unwrap(),
-                    &rest_tail,
-                    literals,
-                    ellipsis,
-                    bindings,
-                );
-            }
-            if input_items.len() != proper_pattern.len() {
-                return false;
-            }
-            for (p, v) in proper_pattern.iter().zip(input_items.iter()) {
-                if !pattern_match(p, v, literals, ellipsis, bindings) {
-                    return false;
-                }
-            }
-            true
+    // No ellipsis — straight element-by-element.
+    if input_items.len() < proper_pattern.len() {
+        return false;
+    }
+    if dotted_tail.is_none() && input_items.len() != proper_pattern.len() {
+        return false;
+    }
+    for (p, v) in proper_pattern.iter().zip(input_items.iter()) {
+        if !pattern_match(p, v, literals, ellipsis, bindings) {
+            return false;
         }
-        None => {
-            // Input is an improper list. Walk both.
-            let mut input_cur = input.clone();
-            for p in &proper_pattern {
-                let Some((c, d)) = input_cur.as_pair() else {
-                    return false;
-                };
-                if !pattern_match(p, &c, literals, ellipsis, bindings) {
-                    return false;
-                }
-                input_cur = d;
+    }
+    // Anything beyond proper_pattern.len() in the input forms the
+    // residue that the dotted-tail pattern (if any) matches.
+    let residue_items: Vec<Value> = input_items[proper_pattern.len()..].to_vec();
+    let residue = if residue_items.is_empty() {
+        input_tail.clone()
+    } else {
+        let mut acc = input_tail.clone();
+        for item in residue_items.into_iter().rev() {
+            acc = Value::cons(item, acc);
+        }
+        acc
+    };
+    match dotted_tail {
+        Some(tail_pat) => pattern_match(&tail_pat, &residue, literals, ellipsis, bindings),
+        None => matches!(residue, Value::Null),
+    }
+}
+
+/// Walk a value as a list, collecting its proper-prefix elements
+/// and returning whatever non-Pair value terminates it. Proper
+/// lists end in `Value::Null`; improper lists end in the dotted
+/// tail. Atoms (non-list inputs) return an empty prefix and the
+/// atom itself.
+fn collect_list_with_tail(v: &Value) -> (Vec<Value>, Value) {
+    let mut out: Vec<Value> = Vec::new();
+    let mut cur = v.clone();
+    loop {
+        match cur {
+            Value::Pair(p) => {
+                let pair = p.borrow();
+                out.push(pair.car.clone());
+                cur = pair.cdr.clone();
             }
-            if let Some(tail_pat) = dotted_tail {
-                pattern_match(&tail_pat, &input_cur, literals, ellipsis, bindings)
-            } else {
-                matches!(input_cur, Value::Null)
-            }
+            other => return (out, other),
         }
     }
 }
@@ -391,29 +418,64 @@ fn is_named_ellipsis(v: &Value, ellipsis: &Symbol) -> bool {
     v.as_identifier().is_some_and(|s| s == ellipsis)
 }
 
+/// Test whether `pattern` is one of the macro's listed literals.
+/// We match by full identifier identity (name + hygiene mark) so
+/// a template-introduced literal `k` does not absorb a same-named
+/// `k` substituted in from the call site.
+fn literal_matches(pattern: &Value, literals: &[Value]) -> bool {
+    let Some(key) = VarKey::from_value(pattern) else {
+        return false;
+    };
+    literals.iter().any(|l| VarKey::from_value(l) == Some(key.clone()))
+}
+
+/// R7RS §4.3.2 literal-vs-input check. Both must be identifiers,
+/// and either:
+///   - they have the same binding in their respective envs, or
+///   - both are unbound and `bound-identifier=?` (same name + same
+///     hygiene mark).
+fn input_matches_literal(input: &Value, lit: &Value) -> bool {
+    let (Some(input_key), Some(lit_key)) =
+        (VarKey::from_value(input), VarKey::from_value(lit))
+    else {
+        return false;
+    };
+    if input_key == lit_key {
+        return true;
+    }
+    // Names differ, or marks differ. If they refer to the same
+    // binding (free-identifier=?), still a match. We approximate
+    // this by checking name equality alone for unmarked
+    // identifiers, since we have no binding-time info here for
+    // user-side input.
+    input_key.name == lit_key.name
+        && (input_key.scope.is_none() || lit_key.scope.is_none())
+}
+
 fn collect_pattern_vars(
     pattern: &Value,
-    literals: &HashSet<Symbol>,
+    literals: &[Value],
     ellipsis: &Symbol,
-) -> Vec<Symbol> {
-    let mut out: Vec<Symbol> = Vec::new();
+) -> Vec<VarKey> {
+    let mut out: Vec<VarKey> = Vec::new();
     collect_pattern_vars_into(pattern, literals, ellipsis, &mut out);
     out
 }
 
 fn collect_pattern_vars_into(
     pattern: &Value,
-    literals: &HashSet<Symbol>,
+    literals: &[Value],
     ellipsis: &Symbol,
-    out: &mut Vec<Symbol>,
+    out: &mut Vec<VarKey>,
 ) {
     if let Some(s) = pattern.as_identifier()
-        && !literals.contains(s)
+        && !literal_matches(pattern, literals)
         && s.name() != "_"
         && s != ellipsis
+        && let Some(key) = VarKey::from_value(pattern)
     {
-        if !out.iter().any(|x| x == s) {
-            out.push(s.clone());
+        if !out.contains(&key) {
+            out.push(key);
         }
         return;
     }
@@ -456,7 +518,14 @@ fn instantiate_inner(
     // resolve pattern bindings / template renames first, then wrap
     // any remaining free identifier with the macro's def-site env.
     if let Some(s) = template.as_identifier() {
-        if let Some(Match::Single(v)) = bindings.0.get(s) {
+        // Bindings are keyed by the full identifier (name + scope
+        // mark): a SyntaxRef:`x` is a different pattern variable
+        // from a plain Symbol:`x`. So a substituted identifier
+        // sharing a name with a template-introduced pattern
+        // variable doesn't collide.
+        if let Some(key) = VarKey::from_value(template)
+            && let Some(Match::Single(v)) = bindings.0.get(&key)
+        {
             return Ok(v.clone());
         }
         if let Some(renamed) = renames.get(s) {
@@ -593,18 +662,18 @@ fn instantiate_list(
 }
 
 /// Find pattern variables referenced in a template subtree.
-fn collect_template_vars(template: &Value, bindings: &Bindings) -> Vec<Symbol> {
+fn collect_template_vars(template: &Value, bindings: &Bindings) -> Vec<VarKey> {
     let mut out = Vec::new();
     collect_template_vars_into(template, bindings, &mut out);
     out
 }
 
-fn collect_template_vars_into(template: &Value, bindings: &Bindings, out: &mut Vec<Symbol>) {
-    if let Some(s) = template.as_identifier()
-        && bindings.0.contains_key(s)
+fn collect_template_vars_into(template: &Value, bindings: &Bindings, out: &mut Vec<VarKey>) {
+    if let Some(key) = VarKey::from_value(template)
+        && bindings.0.contains_key(&key)
     {
-        if !out.iter().any(|x| x == s) {
-            out.push(s.clone());
+        if !out.contains(&key) {
+            out.push(key);
         }
         return;
     }

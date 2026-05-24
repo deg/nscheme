@@ -784,10 +784,8 @@ pub fn eq(a: &Value, b: &Value) -> bool {
         // R7RS `eq?` on identifiers compares by name; whether the
         // symbol carries hygienic env metadata or not doesn't
         // change identity for user-visible equality.
-        (Value::Symbol(x), Value::Symbol(y))
-        | (Value::Symbol(x), Value::SyntaxRef { name: y, .. })
-        | (Value::SyntaxRef { name: x, .. }, Value::Symbol(y))
-        | (Value::SyntaxRef { name: x, .. }, Value::SyntaxRef { name: y, .. }) => x == y,
+        (Value::Symbol(x) | Value::SyntaxRef { name: x, .. },
+         Value::Symbol(y) | Value::SyntaxRef { name: y, .. }) => x == y,
         // R7RS §6.1: eq? on numbers is implementation-defined. We use
         // value equality on unboxed numbers (Int / Float) and pointer
         // equality on heap-allocated numbers (BigInt / Rational).
@@ -1348,10 +1346,8 @@ fn write_complex(c: &ComplexValue, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     // (special values like `+inf.0` / `+nan.0` always emit one) or
     // we may need to prepend it ourselves. Compute it once.
     let im_emits_own_sign = matches!(&c.im, Value::Float(x) if !x.is_finite() || x.is_sign_negative());
-    let mut wrote_real = false;
     if !re_is_zero {
         write_complex_part(&c.re, f)?;
-        wrote_real = true;
     }
     // Print the sign between real and imag (or as leading sign on a
     // purely imaginary value) unless the imag writer will emit it
@@ -1389,30 +1385,36 @@ fn write_float(x: f64, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     if x.is_infinite() {
         return f.write_str(if x > 0.0 { "+inf.0" } else { "-inf.0" });
     }
-    let s = format_f64_15(x);
-    f.write_str(&s)
+    // Use the shortest precision that still round-trips. R7RS
+    // §6.2.6 requires (string->number (number->string x)) to
+    // recover x; we honour that but prefer 15-digit output (chibi
+    // / Racket convention) where it round-trips, and only widen to
+    // 16 or 17 digits at boundary values (e.g. ±f64::MAX) where
+    // 15 digits is lossy.
+    for sig_digits in [15usize, 16, 17] {
+        let s = format_f64_n(x, sig_digits);
+        if let Ok(parsed) = s.parse::<f64>()
+            && parsed.to_bits() == x.to_bits()
+        {
+            return f.write_str(&s);
+        }
+    }
+    // Should not be reachable — f64 round-trips at 17 digits.
+    f.write_str(&format_f64_n(x, 17))
 }
 
-/// Render a finite `f64` using at most 15 significant digits — the
-/// conventional Scheme-side precision (chibi, Racket's 15-digit
-/// mode). The output always contains a decimal point or an
+/// Render a finite `f64` using exactly `sig_digits` significant
+/// digits. The output always contains a decimal point or an
 /// exponent marker so the reader reconstructs it as inexact.
-///
-/// R7RS §6.2.6 requires `(string->number (number->string x))` to
-/// recover `x`. f64's full precision needs 17 digits in the worst
-/// case, but a tighter "shortest round-trip" representation is
-/// usually shorter than 15 digits. We deliberately format with 15
-/// digits even when shorter would suffice — that lines up with the
-/// chibi reference corpus and is well within f64's 15.95-decimal-
-/// digit precision, so the round-trip is preserved on virtually all
-/// values.
-fn format_f64_15(x: f64) -> String {
+fn format_f64_n(x: f64, sig_digits: usize) -> String {
     if x == 0.0 {
         return if x.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
     }
-    // {:.14e} gives 14 digits after the decimal point in scientific
-    // form — 15 significant digits total.
-    let sci = format!("{x:.14e}");
+    // `{:.Ne}` gives N digits after the decimal point in scientific
+    // form — that's `sig_digits` significant digits total when
+    // N = sig_digits - 1.
+    let prec = sig_digits.saturating_sub(1);
+    let sci = format!("{x:.prec$e}");
     // Split into mantissa and exponent.
     let (mant, exp_str) = sci.split_once('e').expect("scientific format");
     let exp: i32 = exp_str.parse().expect("integer exponent");
@@ -1475,8 +1477,12 @@ fn format_f64_15(x: f64) -> String {
             out.push('.');
             out.push_str(&digits[1..]);
         }
-        // We omit `+` for positive exponents — both forms parse.
+        // R7RS readers accept both `e123` and `e+123`. Chibi and
+        // Racket emit the `+` for positive exponents, so we do too.
         out.push('e');
+        if exp >= 0 {
+            out.push('+');
+        }
         out.push_str(&exp.to_string());
         out
     }

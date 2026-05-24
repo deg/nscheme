@@ -60,7 +60,7 @@ fn chibi_baseline_inner() {
     // Pass-count floor. As nscheme grows toward full R7RS-small the
     // baseline should be ratcheted up. Lowering it requires
     // justification (regression triage in the failing bead).
-    const BASELINE_MIN_PASSES: i64 = 1212;
+    const BASELINE_MIN_PASSES: i64 = 1225;
 
     let env = Env::new_global();
     install_base(&env).expect("install_base");
@@ -110,14 +110,28 @@ fn chibi_baseline_inner() {
     let passes = read_int(&env, "$passes").unwrap_or(0);
     let fails = read_int(&env, "$fails").unwrap_or(0);
 
+    // Two different denominators report here: top-level forms (one
+    // datum per `(test ...)`, `(define ...)`, `(let ...)`, etc.)
+    // and the actual `(test ...)` assertions, since a single
+    // top-level form can run many assertions (e.g. `(let ...
+    // (test ...) (test ...) (test ...))`). Print each with its
+    // own header so the numbers are unambiguous.
+    let total_assertions = passes + fails;
+    let evaluated = total_datums - skip.len() - top_level_errors;
     println!();
     println!("=== chibi r7rs-tests.scm baseline ===");
-    println!("  total datums:     {total_datums}");
-    println!("  evaluated:        {}", total_datums - skip.len());
-    println!("  passes:           {passes}");
-    println!("  failures:         {fails}");
-    println!("  top-level errors: {top_level_errors}");
-    println!("  duration:         {elapsed:.2?}");
+    println!("Top-level forms in corpus:");
+    println!("  total:               {total_datums}");
+    if !skip.is_empty() {
+        println!("  skipped:             {}", skip.len());
+    }
+    println!("  evaluated cleanly:   {evaluated}");
+    println!("  raised an error:     {top_level_errors}");
+    println!("Test assertions run inside those forms:");
+    println!("  total:               {total_assertions}");
+    println!("  passed:              {passes}");
+    println!("  failed:              {fails}");
+    println!("Duration: {elapsed:.2?}");
     if !first_errors.is_empty() {
         println!();
         println!("First top-level errors (truncated to 5):");

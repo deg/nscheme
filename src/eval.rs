@@ -386,12 +386,21 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
             return Ok(Step::Return(v));
         }
         Value::SyntaxRef { name, env: def_env } => {
-            // Macro-introduced reference: resolve in the macro's
-            // definition-site env, never the call-site env (R7RS
-            // hygiene §4.3.2).
-            let v = def_env.lookup(name).ok_or_else(|| {
-                EvalError::Runtime(RuntimeError::Undefined(name.name().to_string()))
-            })?;
+            // Macro-introduced reference. R7RS hygiene §4.3.2:
+            //   1. Resolve in the macro's definition-site env first
+            //      (so a user shadowing the macro's referenced
+            //      bindings at the call site doesn't affect us).
+            //   2. If unbound there, the identifier was likely
+            //      introduced by the macro's own template — e.g. a
+            //      `let-syntax`/`let`/`lambda` binding that came in
+            //      with the expansion. Fall back to the call-site
+            //      env.
+            let v = def_env
+                .lookup(name)
+                .or_else(|| env.lookup(name))
+                .ok_or_else(|| {
+                    EvalError::Runtime(RuntimeError::Undefined(name.name().to_string()))
+                })?;
             return Ok(Step::Return(v));
         }
         Value::Null => {
@@ -408,8 +417,14 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
     // Compound expression: a pair. Inspect the head.
     let (head, tail) = expr.as_pair().expect("must be a pair");
     // A macro-introduced free identifier carries its definition-site
-    // environment. Resolve it there directly (bypassing the
-    // call-site env) — that is R7RS hygiene.
+    // environment. R7RS hygiene §4.3.2: head dispatch checks
+    //   (1) the def-site env (handles user shadowing at the call
+    //       site — shadowed bindings don't affect us),
+    //   (2) the special-form name table (so `(SR:if …)` stays the
+    //       `if` keyword even when the call-site env shadowed it),
+    //   (3) the call-site env (so a binding the macro itself
+    //       introduced via the template — e.g. through `let-syntax`
+    //       — remains visible to template references).
     if let Value::SyntaxRef { name, env: def_env } = &head {
         if let Some(value) = def_env.lookup(name) {
             if let Value::Macro(rules) = value {
@@ -422,12 +437,23 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
             }
             return step_call(value, tail, env, frames);
         }
-        // Unbound in def_env: R7RS keywords (`let`, `if`, …) live
-        // in this slot. Dispatch as a special form WITHOUT falling
-        // back through the call-site env-first lookup that plain
-        // Symbols use, so user shadowing at the call site doesn't
-        // accidentally rebind a macro's intended keyword.
-        return dispatch_special_form(name, tail, env, frames);
+        if is_special_form_name(name.name()) {
+            return dispatch_special_form(name, tail, env, frames);
+        }
+        if let Some(value) = env.lookup(name) {
+            if let Value::Macro(rules) = value {
+                let args = collect_list(&tail).map_err(|()| {
+                    EvalError::malformed("macro", "argument list must be proper")
+                })?;
+                let call_form = Value::cons(Value::Symbol(name.clone()), Value::list_from(args));
+                let expanded = crate::macros::expand(&rules, &call_form)?;
+                return Ok(Step::Eval(expanded, env));
+            }
+            return step_call(value, tail, env, frames);
+        }
+        return Err(EvalError::Runtime(RuntimeError::Undefined(
+            name.name().to_string(),
+        )));
     }
     if let Value::Symbol(sym) = &head {
         // R7RS-style shadowing: a binding in the lexical env always
@@ -451,6 +477,58 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
     }
 
     step_call(head, tail, env, frames)
+}
+
+/// True if `name` is one of the evaluator's syntactic keywords.
+/// Used by `SyntaxRef` head dispatch to decide whether to treat
+/// an unbound macro-introduced identifier as a keyword (e.g. `let`,
+/// `if`) before falling back to call-site env lookup.
+fn is_special_form_name(name: &str) -> bool {
+    matches!(
+        name,
+        "quote"
+            | "if"
+            | "lambda"
+            | "define"
+            | "set!"
+            | "begin"
+            | "let"
+            | "let*"
+            | "letrec"
+            | "letrec*"
+            | "cond"
+            | "case"
+            | "and"
+            | "or"
+            | "when"
+            | "unless"
+            | "do"
+            | "quasiquote"
+            | "define-syntax"
+            | "let-syntax"
+            | "letrec-syntax"
+            | "define-library"
+            | "import"
+            | "cond-expand"
+            | "call/cc"
+            | "call-with-current-continuation"
+            | "apply"
+            | "delay"
+            | "delay-force"
+            | "lazy"
+            | "case-lambda"
+            | "define-values"
+            | "define-record-type"
+            | "eval"
+            | "let-values"
+            | "let*-values"
+            | "parameterize"
+            | "raise"
+            | "raise-continuable"
+            | "with-exception-handler"
+            | "guard"
+            | "dynamic-wind"
+    )
 }
 
 /// Dispatch a symbol-headed form as a special form. Used when the
@@ -694,25 +772,22 @@ fn import_one(lib_form: &Value, target: &EnvRef) -> Result<(), EvalError> {
 fn step_apply_form(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
     let items = collect_list(&tail)
         .map_err(|()| EvalError::malformed("apply", "argument list must be proper"))?;
-    if items.is_empty() {
-        return Err(EvalError::malformed(
-            "apply",
-            "expected at least proc and arglist",
+    // R7RS §6.10: apply takes a procedure plus at least one
+    // argument-list (`(apply proc args...)` with args... non-empty).
+    // `(apply proc)` is an arity error, raised as a catchable
+    // exception so `(guard …)` and `(test-error …)` see it.
+    if items.len() < 2 {
+        return Ok(Step::Raise(
+            runtime_error_to_value(RuntimeError::Arity {
+                procedure: "apply".into(),
+                expected: "at least 2".into(),
+                got: items.len(),
+            }),
+            /*continuable=*/ false,
         ));
     }
     let proc_expr = items[0].clone();
     let inner_args = items[1..].to_vec();
-    if inner_args.is_empty() {
-        // (apply proc) with no further args is a corner case;
-        // R7RS requires at least one arg-list. Treat (apply proc) as
-        // applying proc to (). This is permissive but harmless.
-        frames.push(Frame::ApplySpread {
-            evaluated: Vec::new(),
-            remaining: Vec::new(),
-            env: env.clone(),
-        });
-        return Ok(Step::Eval(proc_expr, env));
-    }
     // Push an ApplySpread frame that will, after evaluating the proc
     // and each arg, treat the last evaluated arg as the spread list.
     frames.push(Frame::ApplySpread {

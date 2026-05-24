@@ -292,25 +292,20 @@ Sample output:
 
 ```
 === chibi r7rs-tests.scm baseline ===
-  total datums:     1180
-  evaluated:        1180
-  passes:           1212
-  failures:         8
-  top-level errors: 1
-  duration:         ~190ms
+Top-level forms in corpus:
+  total:               1180
+  evaluated cleanly:   1180
+  raised an error:     0
+Test assertions run inside those forms:
+  total:               1225
+  passed:              1225
+  failed:              0
+Duration: ~230ms
 ```
 
-`total datums` is the number of top-level forms in the corpus;
-`passes` / `failures` count individual `(test ...)` assertions
-inside those forms (a single top-level `begin` or `let` can run
-many tests). The four remaining failures are macro-hygiene corner
-cases involving very advanced `syntax-rules` patterns
-(`bound-identifier=?` / `free-identifier=?` tests, ellipsis as a
-pattern literal, nested define-syntax inside another macro
-template) plus a couple of edge tests where the corpus's
-expectation is itself imprecise. The one top-level error is the
-nested `let-syntax` `bound-identifier=?` example, which needs
-syntactic-closure-level hygiene we haven't built.
+All 1225 chibi `(test …)` / `(test-assert …)` / `(test-error …)`
+assertions pass; every one of the 1180 top-level forms evaluates
+without raising an uncaught exception.
 
 The `BASELINE_MIN_PASSES` constant in the test guards against
 regressions — lowering it requires triage in

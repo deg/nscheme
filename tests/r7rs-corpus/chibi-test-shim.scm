@@ -101,11 +101,16 @@
                       (cons 'ok expr))))
        (cond
         ((eq? (car outcome) 'err)
-         (set! $fails (+ $fails 1)))
+         (set! $fails (+ $fails 1))
+         (set! $failures
+               (cons (list 'assert-raised 'expr (cdr outcome))
+                     $failures)))
         ((cdr outcome)
          (set! $passes (+ $passes 1)))
         (else
-         (set! $fails (+ $fails 1))))))
+         (set! $fails (+ $fails 1))
+         (set! $failures
+               (cons (list 'assert-false 'expr) $failures))))))
     ((_ label expr) (test-assert expr))))
 
 (define-syntax test-error
@@ -113,9 +118,14 @@
     ((_ expr)
      (let ((outcome (guard (e (else (cons 'err e)))
                       (cons 'ok expr))))
-       (if (eq? (car outcome) 'err)
-           (set! $passes (+ $passes 1))
-           (set! $fails (+ $fails 1)))))
+       (cond
+        ((eq? (car outcome) 'err)
+         (set! $passes (+ $passes 1)))
+        (else
+         (set! $fails (+ $fails 1))
+         (set! $failures
+               (cons (list 'expected-error 'expr 'got (cdr outcome))
+                     $failures))))))
     ((_ label expr) (test-error expr))))
 
 (define-syntax test-read-error
