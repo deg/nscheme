@@ -8,3 +8,7 @@
 .beads-credential-key
 # Beads atomic-write temp files
 .beads/.~*
+
+# Editor auto-save / lock files (Emacs, etc.)
+\#*\#
+.\#*
