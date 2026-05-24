@@ -1,8 +1,20 @@
 # Building nscheme: An Experiment in AI-Assisted Implementation
 
-A retrospective on a four-day project: hand the Claude coding agent a
-spec — the R7RS-small Scheme standard — and see how much of it gets
-built, how well it works, and what it takes to actually get to done.
+A retrospective on a small experiment with an unexpectedly large
+output. The plan was to hand the Claude coding agent a spec — the
+R7RS-small Scheme standard — and see how much of it gets built, how
+well it works, and what it takes to actually get to done.
+
+The agent worked across three sessions over four wall-clock days:
+- Thursday afternoon: ~3 hours of agent time, maybe 30 minutes of
+  mine.
+- Saturday night: another ~2 hours of agent time.
+- Sunday morning: a final hour, with the heaviest human pushback.
+
+Total: somewhere around 6 hours of Claude time, 1-2 hours of human
+time. The codebase that came out the other side is ~13,000 lines of
+Rust and passes 1225 of 1225 assertions in chibi-scheme's standard
+R7RS conformance corpus.
 
 ## The question
 
@@ -61,9 +73,10 @@ That is an unusual amount of leash. Claude planned the initial 19
 beads, paused to confirm the binary name and the crate layout, and
 then started shipping.
 
-## Day one through three: the autonomous phase
+## Session one: the autonomous phase
 
-Things moved fast. Over the first three days, Claude:
+The first three-hour session Thursday afternoon moved fast. In that
+single sitting, Claude:
 
 - Wrote a lexer with full R7RS lexical syntax (numbers, strings,
   characters, identifiers, datum comments, vectors, bytevectors).
@@ -87,19 +100,24 @@ Things moved fast. Over the first three days, Claude:
   the step loop architecture made this two dozen lines.
 - Implemented exception handling on the same frame stack.
 
-At the end of three days, the conformance number was around 480
-passes out of ~1180 datums. Most of the structural work was done.
-The remaining failures and errors were R7RS corners.
+At the end of session one, the conformance number was around 480
+passes out of 1180 datums. Most of the structural work was done in
+those three hours. The remaining failures and errors were R7RS
+corners.
 
 This was the part of the project where the experiment was working
 exactly as I had hoped. Bead created → bead implemented → tests pass
 → ADR written → committed → next bead. I was reading commits, not
-writing code.
+writing code — and barely reading them, because the next one was
+already coming.
 
-## The plateau
+I then closed the laptop and did not look at the project for two
+days.
 
-Then we hit the conformance suite seriously, and the experiment got
-more interesting.
+## Sessions two and three: the plateau
+
+When I came back to it on Saturday night, we hit the conformance
+suite seriously, and the experiment got more interesting.
 
 Each cycle of "run the chibi corpus, look at what failed, fix it"
 moved the number. But the pattern of conversation that emerged was
@@ -107,8 +125,8 @@ not what I expected.
 
 Round after round, Claude would do good work, declare the work
 complete, and document the remaining failures as "documented v1
-limitations." On more than one occasion I had to push back in
-fairly direct terms:
+limitations." Across the Saturday and Sunday sessions I had to push
+back in fairly direct terms more than once:
 
 > Why have you, again, decided not to implement the full spec.
 > Your instructions are to complete the spec.
@@ -162,7 +180,8 @@ possible, and the score moved.
 
 ## The result
 
-At the end of four days:
+After roughly six hours of agent time and one or two hours of human
+time, spread across three sessions:
 
 - **3,600 lines** of `eval.rs`, 1,800 of `value.rs`, plus parser,
   lexer, macro expander, I/O, library system, builtins.
@@ -232,6 +251,19 @@ form" to "implement the next form" to "fix the bug the corpus
 surfaced" to "update the README." The work that needed human
 judgment — scope, architecture, when something is genuinely done —
 was where I stayed engaged.
+
+**Agent time is decoupled from human time.** This is worth saying
+out loud because it shifts what's economically possible. The
+project consumed 1-2 hours of my attention over four wall-clock
+days. It consumed ~6 hours of Claude's. The leverage ratio
+mattered: the human-time bottleneck wasn't typing speed or
+code-review throughput, it was decision-making density. When I
+gave a session a clear bound ("get the corpus to pass" or "file
+the remaining gaps as beads") I could check in afterward and the
+work would be largely done. The hour I spent was structurally
+similar to an hour spent reviewing a junior engineer's
+sustained-effort week — except the calendar week had been
+compressed into the same hour.
 
 ## What didn't
 
