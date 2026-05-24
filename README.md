@@ -4,6 +4,10 @@ An [R7RS-small](https://small.r7rs.org/) Scheme interpreter written in
 Rust. Built primarily as an experiment in autonomous AI-assisted
 development; not (yet) a production-grade implementation.
 
+See [PROJECT.md](PROJECT.md) for a retrospective on the build process
+— what worked, what didn't, and lessons for similar AI-assisted
+implementation projects.
+
 ## What this is
 
 - A **tree-walking interpreter** for a subset of Scheme — Lisp's
