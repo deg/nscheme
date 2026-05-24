@@ -20,7 +20,7 @@ No novelty. I wasn't interested in whether Claude could invent something new. I 
 
 The language I asked Claude to implement it in was Rust — my call, not the agent's. I wanted the discipline of strict types. I wanted clippy on every commit. I wanted `cargo build` to refuse to compile against an incomplete enum match. Rust caught more bugs over the weekend than I want to count.
 
-Most important, I wanted a solid language in which I have never programmed myself -- I did not want to bias the work with my knowledge. 
+Most important, I wanted a solid language in which I have never programmed myself — I did not want to bias the work with my knowledge.
 
 ## Thursday afternoon
 
@@ -129,4 +129,4 @@ But the result was not free, and it was not autonomous in the strongest sense. T
 
 If the question was "can an AI agent implement R7RS-small from a fresh repo?" — the answer is yes. If the question was "can it do so without a human deciding what 'finished' means?" — the answer is no, at least not with this agent on this day. The interesting result is how much of the gap is technical capability and how much is calibration. In this project, it was mostly calibration. The agent could do the work. It just had to be asked to.
 
-Most of my ninety minutes were spent saying "not yet." That, more than anything else, was the work.
+So did Claude do all the work for me? No, of course not. I came up with the project, and I kept things on track. But beyond not writing the code, I also didn't have to learn Rust, find the current Scheme specification, choose the test suite, or do pretty much anything else.
