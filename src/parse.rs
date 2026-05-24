@@ -465,10 +465,26 @@ fn parse_rectangular_complex(
     bad: impl Fn() -> ParseError + Copy,
 ) -> Result<Option<Value>, ParseError> {
     let inner = &body[..body.len() - 1];
-    // Bare `+i` / `-i`: real=0, imag=±1.
+    // Bare `+i` / `-i`: real=0, imag=±1 — exact (R7RS §7.1.1
+    // groups `+i`/`-i` with the exact complex syntax, not the
+    // inexact one).
     match inner {
-        "+" => return Ok(Some(Value::Complex(Rc::new((0.0, 1.0))))),
-        "-" => return Ok(Some(Value::Complex(Rc::new((0.0, -1.0))))),
+        "+" => {
+            return Ok(Some(Value::Complex(Rc::new(
+                crate::value::ComplexValue {
+                    re: Value::Int(0),
+                    im: Value::Int(1),
+                },
+            ))));
+        }
+        "-" => {
+            return Ok(Some(Value::Complex(Rc::new(
+                crate::value::ComplexValue {
+                    re: Value::Int(0),
+                    im: Value::Int(-1),
+                },
+            ))));
+        }
         "" => return Err(bad()),
         _ => {}
     }
@@ -486,8 +502,13 @@ fn parse_rectangular_complex(
     }
     let Some(at) = split else {
         // Entirely imaginary, e.g. `5i`, `1.5i`, `3/4i`.
-        let im = real_str_to_f64(inner, bad)?;
-        return Ok(Some(Value::Complex(Rc::new((0.0, im)))));
+        let imag_value = real_str_to_value(inner, num, bad)?;
+        return Ok(Some(Value::Complex(Rc::new(
+            crate::value::ComplexValue {
+                re: Value::Int(0),
+                im: imag_value,
+            },
+        ))));
     };
     let (real_str, imag_str) = inner.split_at(at);
     let imag_str = match imag_str {
@@ -503,9 +524,12 @@ fn parse_rectangular_complex(
         // Exact-zero imaginary part: collapse to the real value.
         return Ok(Some(real_value));
     }
-    let re_f = to_f64(&real_value);
-    let im_f = to_f64(&imag_value);
-    Ok(Some(Value::Complex(Rc::new((re_f, im_f)))))
+    Ok(Some(Value::Complex(Rc::new(
+        crate::value::ComplexValue {
+            re: real_value,
+            im: imag_value,
+        },
+    ))))
 }
 
 fn parse_polar_complex(
@@ -522,7 +546,7 @@ fn parse_polar_complex(
     let ang = real_str_to_f64(ang_s, bad)?;
     let re = mag * ang.cos();
     let im = mag * ang.sin();
-    Ok(Some(Value::Complex(Rc::new((re, im)))))
+    Ok(Some(Value::complex_inexact(re, im)))
 }
 
 /// Parse a real-part substring of a complex literal as a Value,

@@ -701,7 +701,8 @@ impl<'a> Lexer<'a> {
 
     fn lex_sign_starting(&mut self, start: usize) -> Token {
         // The current char is '+' or '-'. Decide between:
-        //   - a number (sign followed by digit / dot / "inf.0" / "nan.0")
+        //   - a number (sign followed by digit / dot / "inf.0" / "nan.0"
+        //     / a bare `i` for the complex unit imaginary)
         //   - a peculiar identifier (just `+`, `-`, or sign followed by sign-subsequent…)
         let sign = self.peek_char().unwrap();
         let next = self.peek_char_at(1);
@@ -709,11 +710,20 @@ impl<'a> Lexer<'a> {
             Some(c) if c.is_ascii_digit() => true,
             Some('.') => matches!(self.peek_char_at(2), Some(c) if c.is_ascii_digit()),
             Some('i' | 'I' | 'n' | 'N') => {
-                // +inf.0 / +nan.0 / -inf.0 / -nan.0 — case-insensitive
-                // per R7RS §7.1.1 lexical syntax.
+                // +inf.0 / +nan.0 — five-char identifiers.
                 let rest = &self.src[self.pos + sign.len_utf8()..];
-                let prefix4: String = rest.chars().take(5).collect();
-                prefix4.eq_ignore_ascii_case("inf.0") || prefix4.eq_ignore_ascii_case("nan.0")
+                let prefix5: String = rest.chars().take(5).collect();
+                if prefix5.eq_ignore_ascii_case("inf.0")
+                    || prefix5.eq_ignore_ascii_case("nan.0")
+                {
+                    true
+                } else {
+                    // R7RS `+i` / `-i` complex unit. The trailing `i`
+                    // must be followed by a delimiter — otherwise we're
+                    // looking at an identifier like `+inf.0xyz`.
+                    matches!(next, Some('i' | 'I'))
+                        && self.peek_char_at(2).is_none_or(is_delimiter)
+                }
             }
             _ => false,
         };

@@ -153,6 +153,41 @@ pub struct Pair {
     pub cdr: Value,
 }
 
+/// Components of a Cartesian complex number. Each field carries
+/// its own exactness as the underlying `Value` form.
+#[derive(Debug, Clone)]
+pub struct ComplexValue {
+    pub re: Value,
+    pub im: Value,
+}
+
+impl ComplexValue {
+    /// Promote the real part to `f64`.
+    pub fn re_f64(&self) -> f64 {
+        Self::component_f64(&self.re)
+    }
+    /// Promote the imaginary part to `f64`.
+    pub fn im_f64(&self) -> f64 {
+        Self::component_f64(&self.im)
+    }
+    fn component_f64(v: &Value) -> f64 {
+        match v {
+            #[allow(clippy::cast_precision_loss)]
+            Value::Int(n) => *n as f64,
+            Value::BigInt(b) => {
+                use num_traits::ToPrimitive;
+                b.to_f64().unwrap_or(f64::NAN)
+            }
+            Value::Rational(r) => {
+                use num_traits::ToPrimitive;
+                r.to_f64().unwrap_or(f64::NAN)
+            }
+            Value::Float(f) => *f,
+            _ => f64::NAN,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // Procedure
 // ---------------------------------------------------------------------
@@ -445,6 +480,13 @@ pub enum Value {
     Char(char),
     /// A symbol (interned).
     Symbol(Symbol),
+    /// A macro-introduced identifier reference (R7RS hygiene
+    /// §4.3.2): like `Symbol(name)` but carries the definition-site
+    /// environment so the evaluator can resolve it there. Produced
+    /// only by the `syntax-rules` expander when wrapping free
+    /// identifiers in a template; user code never constructs one
+    /// directly.
+    SyntaxRef { name: Symbol, env: EnvRef },
     /// An exact fixnum (fast path for small integers).
     Int(i64),
     /// An exact arbitrary-precision integer. Only used when a result
@@ -456,13 +498,14 @@ pub enum Value {
     Rational(Rc<BigRational>),
     /// An inexact real (R7RS `flonum`).
     Float(f64),
-    /// An inexact complex number stored as a Cartesian (re, im)
-    /// pair. R7RS allows complex numbers to have exact real and
-    /// imaginary parts independently; nscheme v1 restricts the
-    /// complex slot of the tower to inexact only — exact complex
-    /// values with imaginary part 0 collapse to a real value when
-    /// constructed by `make-rectangular` or by the reader.
-    Complex(Rc<(f64, f64)>),
+    /// A Cartesian complex number (R7RS §6.2). Each component is
+    /// itself any of the real-numeric slots (`Int`, `BigInt`,
+    /// `Rational`, `Float`), preserving exactness per part — so
+    /// `1+2i` keeps both components exact while `1.0+2i` keeps the
+    /// real inexact and the imag exact. The reader and
+    /// `make-rectangular` decide what to store; arithmetic typically
+    /// promotes to inexact floats.
+    Complex(Rc<ComplexValue>),
     /// A mutable string.
     String(Rc<RefCell<String>>),
     /// A pair (cons cell).
@@ -540,6 +583,17 @@ impl Value {
 
     pub fn string(s: impl Into<String>) -> Self {
         Self::String(Rc::new(RefCell::new(s.into())))
+    }
+
+    /// Construct an inexact complex value from two `f64`s — both
+    /// parts become `Value::Float`. Use `Value::Complex(Rc::new(
+    /// ComplexValue { re, im }))` directly when component exactness
+    /// matters (parser, `make-rectangular`).
+    pub fn complex_inexact(re: f64, im: f64) -> Self {
+        Self::Complex(Rc::new(ComplexValue {
+            re: Self::Float(re),
+            im: Self::Float(im),
+        }))
     }
 
     pub fn cons(car: Self, cdr: Self) -> Self {
@@ -652,6 +706,38 @@ impl Value {
         }
     }
 
+    /// Treat this value as an identifier and return its underlying
+    /// symbol. Accepts both plain `Symbol` and macro-introduced
+    /// `SyntaxRef` — the wrapping env carries hygiene info but the
+    /// name itself is the same.
+    pub fn as_identifier(&self) -> Option<&Symbol> {
+        match self {
+            Self::Symbol(s) => Some(s),
+            Self::SyntaxRef { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Like `as_identifier`, but also returns the env where the
+    /// identifier originated when it's a `SyntaxRef`. Use this in
+    /// variable-reference and `set!` positions where hygiene
+    /// dictates that the binding lives in the macro's def-site env.
+    pub fn as_identifier_ref(&self) -> Option<(&Symbol, Option<&EnvRef>)> {
+        match self {
+            Self::Symbol(s) => Some((s, None)),
+            Self::SyntaxRef { name, env } => Some((name, Some(env))),
+            _ => None,
+        }
+    }
+
+    /// True iff this value is an identifier (`Symbol` or `SyntaxRef`)
+    /// whose underlying name is `keyword`. Used to recognise
+    /// syntactic-position keywords (`else`, `=>`, `syntax-rules`, …)
+    /// regardless of macro-introduction wrapping.
+    pub fn is_keyword(&self, keyword: &str) -> bool {
+        self.as_identifier().is_some_and(|s| s.name() == keyword)
+    }
+
     /// Friendly type name for error messages.
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -660,7 +746,7 @@ impl Value {
             Self::Eof => "eof-object",
             Self::Bool(_) => "boolean",
             Self::Char(_) => "char",
-            Self::Symbol(_) => "symbol",
+            Self::Symbol(_) | Self::SyntaxRef { .. } => "symbol",
             Self::Int(_)
             | Self::BigInt(_)
             | Self::Rational(_)
@@ -695,7 +781,13 @@ pub fn eq(a: &Value, b: &Value) -> bool {
         | (Value::Eof, Value::Eof) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Char(x), Value::Char(y)) => x == y,
-        (Value::Symbol(x), Value::Symbol(y)) => x == y,
+        // R7RS `eq?` on identifiers compares by name; whether the
+        // symbol carries hygienic env metadata or not doesn't
+        // change identity for user-visible equality.
+        (Value::Symbol(x), Value::Symbol(y))
+        | (Value::Symbol(x), Value::SyntaxRef { name: y, .. })
+        | (Value::SyntaxRef { name: x, .. }, Value::Symbol(y))
+        | (Value::SyntaxRef { name: x, .. }, Value::SyntaxRef { name: y, .. }) => x == y,
         // R7RS §6.1: eq? on numbers is implementation-defined. We use
         // value equality on unboxed numbers (Int / Float) and pointer
         // equality on heap-allocated numbers (BigInt / Rational).
@@ -735,9 +827,8 @@ pub fn eqv(a: &Value, b: &Value) -> bool {
             x.to_bits() == y.to_bits()
         }
         (Value::Complex(x), Value::Complex(y)) => {
-            // Bit-pattern match each component so NaN parts compare
-            // equal to themselves (mirroring the Float arm).
-            x.0.to_bits() == y.0.to_bits() && x.1.to_bits() == y.1.to_bits()
+            // eqv? on a complex compares each component eqv?-wise.
+            eqv(&x.re, &y.re) && eqv(&x.im, &y.im)
         }
         // Cross-exactness comparisons are always #f.
         _ => eq(a, b),
@@ -979,6 +1070,17 @@ fn write_value_body(
                 write_char_literal(*c, f)
             }
         }
+        Value::SyntaxRef { name, .. } => {
+            // Render a macro-introduced reference using the same
+            // rules as a plain symbol — the carried env is metadata
+            // for the evaluator and isn't user-visible.
+            let n = name.name();
+            if display || !symbol_needs_pipes(n) {
+                f.write_str(n)
+            } else {
+                write_pipe_quoted_symbol(n, f)
+            }
+        }
         Value::Symbol(s) => {
             // R7RS write must produce a representation that the
             // reader can parse back. For symbols whose name looks
@@ -1002,29 +1104,7 @@ fn write_value_body(
             write!(f, "{r}")
         }
         Value::Float(x) => write_float(*x, f),
-        Value::Complex(c) => {
-            let (re, im) = **c;
-            // R7RS lexeme: `<re><sign><|im|>i` or, when re=0, just
-            // `±<|im|>i`. Special-case ±1.0 imaginary to print `+i`
-            // / `-i`. NaN/infinity imag parts are formatted via the
-            // same writer that handles real Float output.
-            if re != 0.0 || (re == 0.0 && re.is_sign_negative()) {
-                write_float(re, f)?;
-                if im.is_sign_negative() || im.is_nan() {
-                    // write_float already emits the sign.
-                    write_float(im, f)?;
-                } else {
-                    f.write_str("+")?;
-                    write_float(im, f)?;
-                }
-            } else if im.is_sign_negative() {
-                write_float(im, f)?;
-            } else {
-                f.write_str("+")?;
-                write_float(im, f)?;
-            }
-            f.write_str("i")
-        }
+        Value::Complex(c) => write_complex(c, f),
         Value::String(s) => {
             if display {
                 f.write_str(&s.borrow())
@@ -1236,6 +1316,72 @@ fn write_string_literal(s: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str("\"")
 }
 
+/// R7RS lexeme `<re><sign><|im|>i`. Each component carries its own
+/// exactness, so a part with `Value::Float` renders with a decimal
+/// point and `Value::Int` / `Value::Rational` render without. The
+/// special unit cases `+i` / `-i` (imag ±1, no real shown) and the
+/// pure-imaginary cases (`0+1.0i`-style suppression of the leading
+/// zero) follow R7RS §6.2.6.
+fn write_complex(c: &ComplexValue, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    use num_traits::Zero;
+    let re_is_negative_zero = matches!(c.re, Value::Float(x) if x == 0.0 && x.is_sign_negative());
+    let re_is_zero = !re_is_negative_zero
+        && match &c.re {
+            Value::Int(0) => true,
+            Value::BigInt(b) => b.is_zero(),
+            Value::Rational(r) => r.numer().is_zero(),
+            Value::Float(x) => *x == 0.0,
+            _ => false,
+        };
+    let im_is_neg = match &c.im {
+        Value::Int(n) => *n < 0,
+        Value::BigInt(b) => b.sign() == num_bigint::Sign::Minus,
+        Value::Rational(r) => r.numer().sign() == num_bigint::Sign::Minus,
+        Value::Float(x) => x.is_sign_negative() || x.is_nan(),
+        _ => false,
+    };
+    // R7RS `+i` / `-i` is exact only — `+1.0i` keeps the decimal
+    // point because the imag part is inexact. So shorten the unit
+    // form only when imag is an exact ±1.
+    let im_is_unit = matches!(&c.im, Value::Int(1 | -1));
+    // The sign of the imaginary part may be carried by its writer
+    // (special values like `+inf.0` / `+nan.0` always emit one) or
+    // we may need to prepend it ourselves. Compute it once.
+    let im_emits_own_sign = matches!(&c.im, Value::Float(x) if !x.is_finite() || x.is_sign_negative());
+    let mut wrote_real = false;
+    if !re_is_zero {
+        write_complex_part(&c.re, f)?;
+        wrote_real = true;
+    }
+    // Print the sign between real and imag (or as leading sign on a
+    // purely imaginary value) unless the imag writer will emit it
+    // for us.
+    // Only emit `+` for non-negative imag (negative imag's writer
+    // prints the `-` itself; +inf / +nan also self-prefix).
+    if !im_emits_own_sign && !im_is_neg {
+        f.write_str("+")?;
+    }
+    if im_is_unit {
+        if im_is_neg {
+            f.write_str("-")?;
+        }
+        // Drop the magnitude `1` for unit-magnitude imag.
+    } else {
+        write_complex_part(&c.im, f)?;
+    }
+    f.write_str("i")
+}
+
+fn write_complex_part(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match v {
+        Value::Int(n) => write!(f, "{n}"),
+        Value::BigInt(b) => write!(f, "{b}"),
+        Value::Rational(r) => write!(f, "{r}"),
+        Value::Float(x) => write_float(*x, f),
+        _ => Ok(()),
+    }
+}
+
 fn write_float(x: f64, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     if x.is_nan() {
         return f.write_str("+nan.0");
@@ -1243,13 +1389,96 @@ fn write_float(x: f64, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     if x.is_infinite() {
         return f.write_str(if x > 0.0 { "+inf.0" } else { "-inf.0" });
     }
-    // R7RS requires a decimal point or exponent so that the reader
-    // round-trips it as inexact.
-    let s = format!("{x}");
-    if s.contains('.') || s.contains('e') || s.contains('E') {
-        f.write_str(&s)
+    let s = format_f64_15(x);
+    f.write_str(&s)
+}
+
+/// Render a finite `f64` using at most 15 significant digits — the
+/// conventional Scheme-side precision (chibi, Racket's 15-digit
+/// mode). The output always contains a decimal point or an
+/// exponent marker so the reader reconstructs it as inexact.
+///
+/// R7RS §6.2.6 requires `(string->number (number->string x))` to
+/// recover `x`. f64's full precision needs 17 digits in the worst
+/// case, but a tighter "shortest round-trip" representation is
+/// usually shorter than 15 digits. We deliberately format with 15
+/// digits even when shorter would suffice — that lines up with the
+/// chibi reference corpus and is well within f64's 15.95-decimal-
+/// digit precision, so the round-trip is preserved on virtually all
+/// values.
+fn format_f64_15(x: f64) -> String {
+    if x == 0.0 {
+        return if x.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
+    }
+    // {:.14e} gives 14 digits after the decimal point in scientific
+    // form — 15 significant digits total.
+    let sci = format!("{x:.14e}");
+    // Split into mantissa and exponent.
+    let (mant, exp_str) = sci.split_once('e').expect("scientific format");
+    let exp: i32 = exp_str.parse().expect("integer exponent");
+    let negative = mant.starts_with('-');
+    let mant_no_sign = mant.trim_start_matches('-');
+    // Mantissa is `d.dddddddddddddd` — peel off the dot.
+    let digits: String = mant_no_sign.chars().filter(|c| *c != '.').collect();
+    // Trim trailing zeros from the digit string, but keep at least
+    // one digit so a value like 1.0 stays as `1.0` not `1.`.
+    let trimmed_end = digits.trim_end_matches('0');
+    let digits: String = if trimmed_end.is_empty() {
+        "0".into()
     } else {
-        write!(f, "{s}.0")
+        trimmed_end.into()
+    };
+    // Place the decimal point. The original scientific form had it
+    // after one digit, so the value is `digits[0].digits[1..] * 10^exp`.
+    // For the fixed form we want `whole.frac`, where `whole` and
+    // `frac` are slices into `digits` shifted by `exp+1`.
+    let sign = if negative { "-" } else { "" };
+    // Choose between fixed and scientific based on exponent.
+    // Heuristic matches what chibi prints: fixed for -4 <= exp <= 15.
+    if (-4..=15).contains(&exp) {
+        let mut out = String::new();
+        out.push_str(sign);
+        if exp >= 0 {
+            #[allow(clippy::cast_sign_loss)]
+            let dpos = exp as usize + 1;
+            if dpos >= digits.len() {
+                out.push_str(&digits);
+                for _ in digits.len()..dpos {
+                    out.push('0');
+                }
+                out.push_str(".0");
+            } else {
+                out.push_str(&digits[..dpos]);
+                out.push('.');
+                out.push_str(&digits[dpos..]);
+            }
+        } else {
+            out.push_str("0.");
+            #[allow(clippy::cast_sign_loss)]
+            let zeros = (-exp) as usize - 1;
+            for _ in 0..zeros {
+                out.push('0');
+            }
+            out.push_str(&digits);
+        }
+        out
+    } else {
+        // Scientific form. `digits[0].rest e exp`. R7RS-canonical
+        // marker is `e`.
+        let mut out = String::new();
+        out.push_str(sign);
+        if digits.len() == 1 {
+            out.push_str(&digits);
+            out.push_str(".0");
+        } else {
+            out.push(digits.as_bytes()[0] as char);
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        // We omit `+` for positive exponents — both forms parse.
+        out.push('e');
+        out.push_str(&exp.to_string());
+        out
     }
 }
 

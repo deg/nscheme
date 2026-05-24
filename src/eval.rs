@@ -385,6 +385,15 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
             })?;
             return Ok(Step::Return(v));
         }
+        Value::SyntaxRef { name, env: def_env } => {
+            // Macro-introduced reference: resolve in the macro's
+            // definition-site env, never the call-site env (R7RS
+            // hygiene §4.3.2).
+            let v = def_env.lookup(name).ok_or_else(|| {
+                EvalError::Runtime(RuntimeError::Undefined(name.name().to_string()))
+            })?;
+            return Ok(Step::Return(v));
+        }
         Value::Null => {
             // `()` is not a valid expression in R7RS; evaluating it
             // is an error.
@@ -398,65 +407,105 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
 
     // Compound expression: a pair. Inspect the head.
     let (head, tail) = expr.as_pair().expect("must be a pair");
+    // A macro-introduced free identifier carries its definition-site
+    // environment. Resolve it there directly (bypassing the
+    // call-site env) — that is R7RS hygiene.
+    if let Value::SyntaxRef { name, env: def_env } = &head {
+        if let Some(value) = def_env.lookup(name) {
+            if let Value::Macro(rules) = value {
+                let args = collect_list(&tail).map_err(|()| {
+                    EvalError::malformed("macro", "argument list must be proper")
+                })?;
+                let call_form = Value::cons(Value::Symbol(name.clone()), Value::list_from(args));
+                let expanded = crate::macros::expand(&rules, &call_form)?;
+                return Ok(Step::Eval(expanded, env));
+            }
+            return step_call(value, tail, env, frames);
+        }
+        // Unbound in def_env: R7RS keywords (`let`, `if`, …) live
+        // in this slot. Dispatch as a special form WITHOUT falling
+        // back through the call-site env-first lookup that plain
+        // Symbols use, so user shadowing at the call site doesn't
+        // accidentally rebind a macro's intended keyword.
+        return dispatch_special_form(name, tail, env, frames);
+    }
     if let Value::Symbol(sym) = &head {
-        match sym.name() {
-            "quote" => return step_quote(&tail),
-            "if" => return step_if(tail, env, frames),
-            "lambda" => return step_lambda(tail, env, None),
-            "define" => return step_define(tail, env, frames),
-            "set!" => return step_set(tail, env, frames),
-            "begin" => return step_begin(tail, env, frames),
-            // Derived forms (T8 nscheme-i4h):
-            "let" => return step_let(tail, env, frames),
-            "let*" => return step_let_star(tail, env, frames),
-            "letrec" | "letrec*" => return step_letrec(tail, env, frames),
-            "cond" => return step_cond(tail, env, frames),
-            "case" => return step_case(tail, env, frames),
-            "and" => return step_and(tail, env, frames),
-            "or" => return step_or(tail, env, frames),
-            "when" => return step_when(tail, env, frames),
-            "unless" => return step_unless(tail, env, frames),
-            "do" => return step_do(tail, env, frames),
-            "quasiquote" => return step_quasiquote(&tail, env),
-            "define-syntax" => return step_define_syntax(tail, env),
-            "let-syntax" | "letrec-syntax" => return step_let_syntax(tail, env, frames),
-            "define-library" => return step_define_library(tail, env),
-            "import" => return step_import(tail, env),
-            "cond-expand" => return step_cond_expand(tail, env, frames),
-            "call/cc" | "call-with-current-continuation" => {
-                return step_call_cc(tail, env, frames);
+        // R7RS-style shadowing: a binding in the lexical env always
+        // wins over the same-named special form. So `(let ((let -))
+        // (let 5))` does *not* invoke the `let` keyword — it calls
+        // `-`. Only fall through to special-form dispatch when the
+        // identifier is unbound (or bound to a Macro, which we
+        // dispatch separately below).
+        if let Some(value) = env.lookup(sym) {
+            if let Value::Macro(rules) = value {
+                let args = collect_list(&tail).map_err(|()| {
+                    EvalError::malformed("macro", "argument list must be proper")
+                })?;
+                let call_form = Value::cons(Value::Symbol(sym.clone()), Value::list_from(args));
+                let expanded = crate::macros::expand(&rules, &call_form)?;
+                return Ok(Step::Eval(expanded, env));
             }
-            "apply" => return step_apply_form(tail, env, frames),
-            "delay" | "delay-force" | "lazy" => return step_delay(tail, env),
-            "case-lambda" => return step_case_lambda(tail, env),
-            "define-values" => return step_define_values(tail, env),
-            "define-record-type" => return step_define_record_type(tail, env),
-            "eval" => return step_eval_form(tail, env, frames),
-            "let-values" => return step_let_values(tail, env, frames, false),
-            "let*-values" => return step_let_values(tail, env, frames, true),
-            "parameterize" => return step_parameterize(tail, env, frames),
-            "raise" => return step_raise_with_frames(tail, env, false, frames),
-            "raise-continuable" => return step_raise_with_frames(tail, env, true, frames),
-            "with-exception-handler" => {
-                return step_with_exception_handler_real(tail, env, frames);
-            }
-            "guard" => return step_guard_real(tail, env, frames),
-            "dynamic-wind" => return step_dynamic_wind(tail, env, frames),
-            _ => { /* fall through to procedure call or macro */ }
+            return step_call(value, tail, env, frames);
         }
-        // Macro application: if the head symbol resolves to a Macro
-        // value, expand and re-evaluate.
-        if let Some(Value::Macro(rules)) = env.lookup(sym) {
-            let args = collect_list(&tail)
-                .map_err(|()| EvalError::malformed("macro", "argument list must be proper"))?;
-            // Reconstruct the full call form (head + args) for matching.
-            let call_form = Value::cons(Value::Symbol(sym.clone()), Value::list_from(args));
-            let expanded = crate::macros::expand(&rules, &call_form)?;
-            return Ok(Step::Eval(expanded, env));
-        }
+        return dispatch_special_form(sym, tail, env, frames);
     }
 
     step_call(head, tail, env, frames)
+}
+
+/// Dispatch a symbol-headed form as a special form. Used when the
+/// head is a bare Symbol with no env binding *and* when a macro-
+/// introduced `SyntaxRef` resolves to no binding in its def-site
+/// env (the usual case for R7RS keywords like `let`, `if`, `lambda`,
+/// …, which aren't real bindings).
+fn dispatch_special_form(
+    sym: &Symbol,
+    tail: Value,
+    env: EnvRef,
+    frames: &mut Vec<Frame>,
+) -> Result<Step, EvalError> {
+    match sym.name() {
+        "quote" => step_quote(&tail),
+        "if" => step_if(tail, env, frames),
+        "lambda" => step_lambda(tail, env, None),
+        "define" => step_define(tail, env, frames),
+        "set!" => step_set(tail, env, frames),
+        "begin" => step_begin(tail, env, frames),
+        "let" => step_let(tail, env, frames),
+        "let*" => step_let_star(tail, env, frames),
+        "letrec" | "letrec*" => step_letrec(tail, env, frames),
+        "cond" => step_cond(tail, env, frames),
+        "case" => step_case(tail, env, frames),
+        "and" => step_and(tail, env, frames),
+        "or" => step_or(tail, env, frames),
+        "when" => step_when(tail, env, frames),
+        "unless" => step_unless(tail, env, frames),
+        "do" => step_do(tail, env, frames),
+        "quasiquote" => step_quasiquote(&tail, env),
+        "define-syntax" => step_define_syntax(tail, env),
+        "let-syntax" | "letrec-syntax" => step_let_syntax(tail, env, frames),
+        "define-library" => step_define_library(tail, env),
+        "import" => step_import(tail, env),
+        "cond-expand" => step_cond_expand(tail, env, frames),
+        "call/cc" | "call-with-current-continuation" => step_call_cc(tail, env, frames),
+        "apply" => step_apply_form(tail, env, frames),
+        "delay" | "delay-force" | "lazy" => step_delay(tail, env),
+        "case-lambda" => step_case_lambda(tail, env),
+        "define-values" => step_define_values(tail, env),
+        "define-record-type" => step_define_record_type(tail, env),
+        "eval" => step_eval_form(tail, env, frames),
+        "let-values" => step_let_values(tail, env, frames, false),
+        "let*-values" => step_let_values(tail, env, frames, true),
+        "parameterize" => step_parameterize(tail, env, frames),
+        "raise" => step_raise_with_frames(tail, env, false, frames),
+        "raise-continuable" => step_raise_with_frames(tail, env, true, frames),
+        "with-exception-handler" => step_with_exception_handler_real(tail, env, frames),
+        "guard" => step_guard_real(tail, env, frames),
+        "dynamic-wind" => step_dynamic_wind(tail, env, frames),
+        _ => Err(EvalError::Runtime(RuntimeError::Undefined(
+            sym.name().to_string(),
+        ))),
+    }
 }
 
 /// `(define-syntax name (syntax-rules ...))` — install a macro.
@@ -464,17 +513,16 @@ fn step_define_syntax(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
     let (name_val, rest) = tail
         .as_pair()
         .ok_or_else(|| EvalError::malformed("define-syntax", "expected name and rules"))?;
-    let Value::Symbol(name) = name_val else {
-        return Err(EvalError::malformed(
-            "define-syntax",
-            "name must be a symbol",
-        ));
-    };
+    let name = name_val
+        .as_identifier()
+        .ok_or_else(|| EvalError::malformed("define-syntax", "name must be a symbol"))?
+        .clone();
     let mut iter = ListIter::new(rest);
     let rules_form = iter
         .next()
         .ok_or_else(|| EvalError::malformed("define-syntax", "expected a syntax-rules form"))??;
-    let rules = crate::macros::parse_syntax_rules(&rules_form)?;
+    let mut rules = crate::macros::parse_syntax_rules(&rules_form)?;
+    rules.def_env = Some(env.clone());
     env.define(name, Value::Macro(Rc::new(rules)));
     Ok(Step::Return(Value::Unspecified))
 }
@@ -504,13 +552,19 @@ fn step_let_syntax(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<
                 "binding must be (name (syntax-rules ...))",
             ));
         }
-        let Value::Symbol(name) = parts[0].clone() else {
-            return Err(EvalError::malformed(
-                "let-syntax",
-                "binding name must be a symbol",
-            ));
-        };
-        let rules = crate::macros::parse_syntax_rules(&parts[1])?;
+        let name = parts[0]
+            .as_identifier()
+            .ok_or_else(|| EvalError::malformed("let-syntax", "binding name must be a symbol"))?
+            .clone();
+        let mut rules = crate::macros::parse_syntax_rules(&parts[1])?;
+        // For letrec-syntax we'd want the def_env to include
+        // sibling macros, but R7RS forbids forward-referencing
+        // siblings in syntax-rules anyway, and our parser doesn't
+        // distinguish let-syntax from letrec-syntax. Use the inner
+        // scope so a referenced binding *introduced inside the
+        // let-syntax body* (rare) at least resolves; for the
+        // common case, the parent env is what matters.
+        rules.def_env = Some(scope.clone());
         scope.define(name, Value::Macro(Rc::new(rules)));
     }
     Ok(eval_sequence(body, scope, frames))
@@ -1162,12 +1216,10 @@ fn step_guard_real(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<
             "header must start with a variable",
         ));
     }
-    let Value::Symbol(var) = header_parts[0].clone() else {
-        return Err(EvalError::malformed(
-            "guard",
-            "guard variable must be a symbol",
-        ));
-    };
+    let var = header_parts[0]
+        .as_identifier()
+        .ok_or_else(|| EvalError::malformed("guard", "guard variable must be a symbol"))?
+        .clone();
     let clauses: Vec<Value> = header_parts.into_iter().skip(1).collect();
     let body = collect_list(&body_tail)
         .map_err(|()| EvalError::malformed("guard", "body must be a proper list"))?;
@@ -1348,7 +1400,7 @@ fn pick_cond_expand_branch(clauses: &[Value]) -> Result<Option<Vec<Value>>, Eval
         if parts.is_empty() {
             return Err(EvalError::malformed("cond-expand", "empty clause"));
         }
-        if matches!(&parts[0], Value::Symbol(s) if s.name() == "else") {
+        if parts[0].is_keyword("else") {
             return Ok(Some(parts.into_iter().skip(1).collect()));
         }
         if eval_feature_req(&parts[0])? {
@@ -1491,32 +1543,33 @@ fn step_define(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step
     let (head, rest) = tail
         .as_pair()
         .ok_or_else(|| EvalError::malformed("define", "expected name and value"))?;
-    match head {
-        Value::Symbol(name) => {
-            let mut value_iter = ListIter::new(rest);
-            let value_expr = value_iter
-                .next()
-                .ok_or_else(|| EvalError::malformed("define", "expected a value expression"))??;
-            if value_iter.next().is_some() {
-                return Err(EvalError::malformed(
-                    "define",
-                    "expected exactly one value expression",
-                ));
-            }
-            frames.push(Frame::DefineBind {
-                name,
-                env: env.clone(),
-            });
-            Ok(Step::Eval(value_expr, env))
+    if let Some(name) = head.as_identifier().cloned() {
+        let mut value_iter = ListIter::new(rest);
+        let value_expr = value_iter
+            .next()
+            .ok_or_else(|| EvalError::malformed("define", "expected a value expression"))??;
+        if value_iter.next().is_some() {
+            return Err(EvalError::malformed(
+                "define",
+                "expected exactly one value expression",
+            ));
         }
+        frames.push(Frame::DefineBind {
+            name,
+            env: env.clone(),
+        });
+        return Ok(Step::Eval(value_expr, env));
+    }
+    match head {
         Value::Pair(_) => {
             // (define (name . formals) body...)
             let (name_val, formals) = head
                 .as_pair()
                 .ok_or_else(|| EvalError::malformed("define", "expected (name . formals)"))?;
-            let Value::Symbol(name_sym) = name_val else {
-                return Err(EvalError::malformed("define", "name must be a symbol"));
-            };
+            let name_sym = name_val
+                .as_identifier()
+                .ok_or_else(|| EvalError::malformed("define", "name must be a symbol"))?
+                .clone();
             // Construct (lambda formals body...) and evaluate it.
             let lambda_tail = Value::cons(formals, rest);
             let closure_step =
@@ -1541,8 +1594,14 @@ fn step_set(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, E
     let (head, rest) = tail
         .as_pair()
         .ok_or_else(|| EvalError::malformed("set!", "expected name and value"))?;
-    let Value::Symbol(name) = head else {
-        return Err(EvalError::malformed("set!", "name must be a symbol"));
+    let (name, target_env) = match head.as_identifier_ref() {
+        Some((s, def_env)) => {
+            // Hygiene: a macro-introduced target name resolves in
+            // the macro's def-site env, not the call site's.
+            let target = def_env.cloned().unwrap_or_else(|| env.clone());
+            (s.clone(), target)
+        }
+        None => return Err(EvalError::malformed("set!", "name must be a symbol")),
     };
     let mut value_iter = ListIter::new(rest);
     let value_expr = value_iter
@@ -1556,7 +1615,7 @@ fn step_set(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, E
     }
     frames.push(Frame::SetBind {
         name,
-        env: env.clone(),
+        env: target_env,
     });
     Ok(Step::Eval(value_expr, env))
 }
@@ -1781,7 +1840,7 @@ fn cond_dispatch(
         return Err(EvalError::malformed("cond", "empty clause"));
     }
     // (else body...)
-    if matches!(&parts[0], Value::Symbol(s) if s.name() == "else") {
+    if parts[0].is_keyword("else") {
         if parts.len() == 1 {
             return Err(EvalError::malformed("cond", "else clause needs a body"));
         }
@@ -1826,7 +1885,7 @@ fn step_case(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
         // machinery.
         let is_arrow =
             parts.len() == 3 && matches!(&parts[1], Value::Symbol(s) if s.name() == "=>");
-        if matches!(&parts[0], Value::Symbol(s) if s.name() == "else") {
+        if parts[0].is_keyword("else") {
             if is_arrow {
                 let proc = parts[2].clone();
                 let call = Value::list_from([proc, key_ref.clone()]);
@@ -2561,8 +2620,15 @@ fn resume(frame: Frame, value: Value, frames: &mut Vec<Frame>) -> Result<Step, E
                     // Single-test clause: return the test value.
                     return Ok(Step::Return(value));
                 }
-                // (test => proc-expr)
-                if parts.len() == 3 && matches!(&parts[1], Value::Symbol(s) if s.name() == "=>") {
+                // (test => proc-expr) — but only when `=>` is NOT
+                // shadowed by a local binding. R7RS scopes `=>` like
+                // any auxiliary keyword: a binding wins.
+                if parts.len() == 3
+                    && parts[1].is_keyword("=>")
+                    && parts[1]
+                        .as_identifier()
+                        .is_some_and(|s| env.lookup(s).is_none())
+                {
                     let proc_expr = parts[2].clone();
                     frames.push(Frame::CondArrow {
                         test_value: value,
@@ -2798,27 +2864,30 @@ fn resume(frame: Frame, value: Value, frames: &mut Vec<Frame>) -> Result<Step, E
 fn parse_formals(form: &Value) -> Result<(Vec<Symbol>, Option<Symbol>), EvalError> {
     match form {
         Value::Null => Ok((Vec::new(), None)),
-        Value::Symbol(s) => Ok((Vec::new(), Some(s.clone()))),
+        v if v.as_identifier().is_some() => {
+            Ok((Vec::new(), Some(v.as_identifier().unwrap().clone())))
+        }
         Value::Pair(_) => {
             let mut positional = Vec::new();
             let mut cur = form.clone();
             loop {
                 match cur {
                     Value::Null => return Ok((positional, None)),
-                    Value::Symbol(s) => return Ok((positional, Some(s))),
+                    v if v.as_identifier().is_some() => {
+                        return Ok((positional, Some(v.as_identifier().unwrap().clone())));
+                    }
                     Value::Pair(p) => {
                         let pair = p.borrow();
                         let head = pair.car.clone();
                         let tail = pair.cdr.clone();
                         drop(pair);
-                        match head {
-                            Value::Symbol(s) => positional.push(s),
-                            other => {
-                                return Err(EvalError::malformed(
-                                    "lambda",
-                                    format!("parameter must be a symbol, got {other}"),
-                                ));
-                            }
+                        if let Some(s) = head.as_identifier() {
+                            positional.push(s.clone());
+                        } else {
+                            return Err(EvalError::malformed(
+                                "lambda",
+                                format!("parameter must be a symbol, got {head}"),
+                            ));
                         }
                         cur = tail;
                     }

@@ -36,6 +36,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
+use crate::env::EnvRef;
 use crate::eval::EvalError;
 use crate::value::{Symbol, Value};
 
@@ -49,6 +50,11 @@ pub struct SyntaxRules {
     pub ellipsis: Symbol,
     pub literals: HashSet<Symbol>,
     pub clauses: Vec<SyntaxClause>,
+    /// Definition-site environment, used by `expand` to wrap free
+    /// identifiers in the template so they resolve to their
+    /// definition-site bindings rather than the call site's. R7RS
+    /// hygiene §4.3.2.
+    pub def_env: Option<EnvRef>,
 }
 
 #[derive(Debug)]
@@ -63,18 +69,18 @@ pub struct SyntaxClause {
 pub fn parse_syntax_rules(form: &Value) -> Result<SyntaxRules, EvalError> {
     let parts =
         collect_list(form).ok_or_else(|| malformed("syntax-rules form must be a proper list"))?;
-    if parts.is_empty() || !matches!(&parts[0], Value::Symbol(s) if s.name() == "syntax-rules") {
+    if parts.is_empty() || !parts[0].is_keyword("syntax-rules") {
         return Err(malformed("expected (syntax-rules ...)"));
     }
     if parts.len() < 2 {
         return Err(malformed("syntax-rules needs at least a literals list"));
     }
-    // Detect the renamed-ellipsis form: if parts[1] is a symbol (not
-    // a list), it's the ellipsis identifier and parts[2] is the
+    // Detect the renamed-ellipsis form: if parts[1] is an identifier
+    // (not a list), it's the ellipsis identifier and parts[2] is the
     // literals list.
-    let (ellipsis, literals_idx) = match &parts[1] {
-        Value::Symbol(s) => (s.clone(), 2),
-        _ => (Symbol::intern("..."), 1),
+    let (ellipsis, literals_idx) = match parts[1].as_identifier() {
+        Some(s) => (s.clone(), 2),
+        None => (Symbol::intern("..."), 1),
     };
     if parts.len() <= literals_idx {
         return Err(malformed("syntax-rules needs at least a literals list"));
@@ -83,12 +89,11 @@ pub fn parse_syntax_rules(form: &Value) -> Result<SyntaxRules, EvalError> {
         .ok_or_else(|| malformed("literals must be a proper list"))?;
     let mut literals: HashSet<Symbol> = HashSet::new();
     for lit in literals_list {
-        match lit {
-            Value::Symbol(s) => {
-                literals.insert(s);
-            }
-            _ => return Err(malformed("literal must be an identifier")),
-        }
+        let s = lit
+            .as_identifier()
+            .ok_or_else(|| malformed("literal must be an identifier"))?
+            .clone();
+        literals.insert(s);
     }
     let mut clauses: Vec<SyntaxClause> = Vec::new();
     for clause in &parts[literals_idx + 1..] {
@@ -106,6 +111,7 @@ pub fn parse_syntax_rules(form: &Value) -> Result<SyntaxRules, EvalError> {
         ellipsis,
         literals,
         clauses,
+        def_env: None,
     })
 }
 
@@ -113,10 +119,17 @@ pub fn parse_syntax_rules(form: &Value) -> Result<SyntaxRules, EvalError> {
 /// pattern fits, and instantiate its template.
 pub fn expand(rules: &SyntaxRules, call: &Value) -> Result<Value, EvalError> {
     for clause in &rules.clauses {
+        // R7RS §4.3.2: the first sub-pattern is conventionally the
+        // macro keyword. Pattern matching against the macro name is
+        // implicit — strip the first element of both pattern and
+        // call so a literal in position 0 (e.g. `(_)` with `_` in
+        // the literals list) doesn't reject the call.
+        let stripped_pattern = strip_head(&clause.pattern);
+        let stripped_call = strip_head(call);
         let mut bindings = Bindings::default();
         if pattern_match(
-            &clause.pattern,
-            call,
+            &stripped_pattern,
+            &stripped_call,
             &rules.literals,
             &rules.ellipsis,
             &mut bindings,
@@ -135,7 +148,13 @@ pub fn expand(rules: &SyntaxRules, call: &Value) -> Result<Value, EvalError> {
                 .into_iter()
                 .map(|s| (s.clone(), gensym(&s)))
                 .collect();
-            return instantiate(&clause.template, &bindings, &renames, &rules.ellipsis);
+            return instantiate(
+                &clause.template,
+                &bindings,
+                &renames,
+                &rules.ellipsis,
+                rules.def_env.as_ref(),
+            );
         }
     }
     Err(malformed("no syntax-rules clause matched"))
@@ -163,19 +182,19 @@ fn pattern_match(
     ellipsis: &Symbol,
     bindings: &mut Bindings,
 ) -> bool {
-    match pattern {
-        Value::Symbol(s) => {
-            if literals.contains(s) {
-                // Literal — input must be the same symbol.
-                matches!(input, Value::Symbol(i) if i == s)
-            } else if s.name() == "_" {
-                // Wildcard.
-                true
-            } else {
-                bindings.0.insert(s.clone(), Match::Single(input.clone()));
-                true
-            }
+    if let Some(s) = pattern.as_identifier() {
+        if literals.contains(s) {
+            // Literal — input must be the same identifier name.
+            return input.as_identifier().is_some_and(|i| i == s);
         }
+        if s.name() == "_" {
+            // Wildcard.
+            return true;
+        }
+        bindings.0.insert(s.clone(), Match::Single(input.clone()));
+        return true;
+    }
+    match pattern {
         Value::Null => matches!(input, Value::Null),
         Value::Pair(_) => match_list(pattern, input, literals, ellipsis, bindings),
         // Everything else: literal datum equality.
@@ -357,8 +376,19 @@ fn pattern_elems(pattern: &Value) -> (Vec<Value>, Option<Value>) {
     }
 }
 
+/// Strip the head of a list-shaped value, returning its tail. The
+/// caller has guaranteed the value is a pair (it's a macro call /
+/// macro clause pattern). For atoms (which shouldn't appear at top
+/// level), we just return the value unchanged.
+fn strip_head(v: &Value) -> Value {
+    match v.as_pair() {
+        Some((_, tail)) => tail,
+        None => v.clone(),
+    }
+}
+
 fn is_named_ellipsis(v: &Value, ellipsis: &Symbol) -> bool {
-    matches!(v, Value::Symbol(s) if s == ellipsis)
+    v.as_identifier().is_some_and(|s| s == ellipsis)
 }
 
 fn collect_pattern_vars(
@@ -377,21 +407,23 @@ fn collect_pattern_vars_into(
     ellipsis: &Symbol,
     out: &mut Vec<Symbol>,
 ) {
-    match pattern {
-        Value::Symbol(s) if !literals.contains(s) && s.name() != "_" && s != ellipsis => {
-            if !out.iter().any(|x| x == s) {
-                out.push(s.clone());
-            }
+    if let Some(s) = pattern.as_identifier()
+        && !literals.contains(s)
+        && s.name() != "_"
+        && s != ellipsis
+    {
+        if !out.iter().any(|x| x == s) {
+            out.push(s.clone());
         }
-        Value::Pair(_) => {
-            let mut cur = pattern.clone();
-            while let Value::Pair(p) = cur {
-                let pair = p.borrow();
-                collect_pattern_vars_into(&pair.car, literals, ellipsis, out);
-                cur = pair.cdr.clone();
-            }
+        return;
+    }
+    if let Value::Pair(_) = pattern {
+        let mut cur = pattern.clone();
+        while let Value::Pair(p) = cur {
+            let pair = p.borrow();
+            collect_pattern_vars_into(&pair.car, literals, ellipsis, out);
+            cur = pair.cdr.clone();
         }
-        _ => {}
     }
 }
 
@@ -404,8 +436,9 @@ fn instantiate(
     bindings: &Bindings,
     renames: &HashMap<Symbol, Symbol>,
     ellipsis: &Symbol,
+    def_env: Option<&EnvRef>,
 ) -> Result<Value, EvalError> {
-    instantiate_inner(template, bindings, renames, ellipsis, false)
+    instantiate_inner(template, bindings, renames, ellipsis, def_env, false)
 }
 
 /// `escape_ellipsis = true` disables R7RS ellipsis-repetition: any
@@ -416,18 +449,35 @@ fn instantiate_inner(
     bindings: &Bindings,
     renames: &HashMap<Symbol, Symbol>,
     ellipsis: &Symbol,
+    def_env: Option<&EnvRef>,
     escape_ellipsis: bool,
 ) -> Result<Value, EvalError> {
-    match template {
-        Value::Symbol(s) => {
-            if let Some(Match::Single(v)) = bindings.0.get(s) {
-                return Ok(v.clone());
-            }
-            if let Some(renamed) = renames.get(s) {
-                return Ok(Value::Symbol(renamed.clone()));
-            }
-            Ok(Value::Symbol(s.clone()))
+    // Identifier (plain Symbol or macro-introduced SyntaxRef):
+    // resolve pattern bindings / template renames first, then wrap
+    // any remaining free identifier with the macro's def-site env.
+    if let Some(s) = template.as_identifier() {
+        if let Some(Match::Single(v)) = bindings.0.get(s) {
+            return Ok(v.clone());
         }
+        if let Some(renamed) = renames.get(s) {
+            return Ok(Value::Symbol(renamed.clone()));
+        }
+        // Already a SyntaxRef? Preserve its env — that's the env of
+        // the macro that introduced the identifier first. Re-wrapping
+        // with the inner macro's def_env would change which env the
+        // identifier resolves in.
+        if let Value::SyntaxRef { .. } = template {
+            return Ok(template.clone());
+        }
+        if let Some(env) = def_env {
+            return Ok(Value::SyntaxRef {
+                name: s.clone(),
+                env: env.clone(),
+            });
+        }
+        return Ok(Value::Symbol(s.clone()));
+    }
+    match template {
         Value::Pair(_) => {
             // R7RS ellipsis escape: `(<ellipsis> <inner>)` expands to
             // `<inner>` with all subsequent ellipses treated as
@@ -436,10 +486,17 @@ fn instantiate_inner(
             if !escape_ellipsis {
                 let (elems, _) = pattern_elems(template);
                 if elems.len() == 2 && is_named_ellipsis(&elems[0], ellipsis) {
-                    return instantiate_inner(&elems[1], bindings, renames, ellipsis, true);
+                    return instantiate_inner(
+                        &elems[1],
+                        bindings,
+                        renames,
+                        ellipsis,
+                        def_env,
+                        true,
+                    );
                 }
             }
-            instantiate_list(template, bindings, renames, ellipsis, escape_ellipsis)
+            instantiate_list(template, bindings, renames, ellipsis, def_env, escape_ellipsis)
         }
         _ => Ok(template.clone()),
     }
@@ -450,6 +507,7 @@ fn instantiate_list(
     bindings: &Bindings,
     renames: &HashMap<Symbol, Symbol>,
     ellipsis: &Symbol,
+    def_env: Option<&EnvRef>,
     escape_ellipsis: bool,
 ) -> Result<Value, EvalError> {
     let (elems, tail) = pattern_elems(template);
@@ -505,6 +563,7 @@ fn instantiate_list(
                     &rep_bindings,
                     renames,
                     ellipsis,
+                    def_env,
                     false,
                 )?);
             }
@@ -515,13 +574,14 @@ fn instantiate_list(
                 bindings,
                 renames,
                 ellipsis,
+                def_env,
                 escape_ellipsis,
             )?);
             i += 1;
         }
     }
     let tail_value = match tail {
-        Some(t) => instantiate_inner(&t, bindings, renames, ellipsis, escape_ellipsis)?,
+        Some(t) => instantiate_inner(&t, bindings, renames, ellipsis, def_env, escape_ellipsis)?,
         None => Value::Null,
     };
     // Build the list.
@@ -540,21 +600,21 @@ fn collect_template_vars(template: &Value, bindings: &Bindings) -> Vec<Symbol> {
 }
 
 fn collect_template_vars_into(template: &Value, bindings: &Bindings, out: &mut Vec<Symbol>) {
-    match template {
-        Value::Symbol(s) if bindings.0.contains_key(s) => {
-            if !out.iter().any(|x| x == s) {
-                out.push(s.clone());
-            }
+    if let Some(s) = template.as_identifier()
+        && bindings.0.contains_key(s)
+    {
+        if !out.iter().any(|x| x == s) {
+            out.push(s.clone());
         }
-        Value::Pair(_) => {
-            let mut cur = template.clone();
-            while let Value::Pair(p) = cur {
-                let pair = p.borrow();
-                collect_template_vars_into(&pair.car, bindings, out);
-                cur = pair.cdr.clone();
-            }
+        return;
+    }
+    if let Value::Pair(_) = template {
+        let mut cur = template.clone();
+        while let Value::Pair(p) = cur {
+            let pair = p.borrow();
+            collect_template_vars_into(&pair.car, bindings, out);
+            cur = pair.cdr.clone();
         }
-        _ => {}
     }
 }
 
@@ -633,6 +693,18 @@ fn collect_binders(template: &Value, out: &mut HashSet<Symbol>) {
                         }
                     }
                     _ => {}
+                }
+                for b in &elems[2..] {
+                    collect_binders(b, out);
+                }
+                return;
+            }
+            "guard" if elems.len() >= 2 => {
+                // (guard (var clause...) body)
+                if let Some((var_val, _)) = elems[1].as_pair()
+                    && let Value::Symbol(s) = var_val
+                {
+                    out.insert(s);
                 }
                 for b in &elems[2..] {
                     collect_binders(b, out);

@@ -54,16 +54,22 @@ pub fn parse_library_name(form: &Value) -> Result<LibraryName, EvalError> {
 /// The implementation-supplied libraries we recognize as no-op imports
 /// because their bindings are already in the global env.
 pub fn is_builtin_library(name: &LibraryName) -> bool {
-    matches!(
-        name.as_slice(),
-        [s, b] if s == "scheme"
-            && matches!(
-                b.as_str(),
-                "base" | "write" | "read" | "char" | "file" | "inexact"
-                | "complex" | "cxr" | "lazy" | "load" | "process-context"
-                | "repl" | "time" | "case-lambda" | "eval" | "r5rs"
-            )
-    )
+    match name.as_slice() {
+        [s, b] if s == "scheme" => matches!(
+            b.as_str(),
+            "base" | "write" | "read" | "char" | "file" | "inexact"
+            | "complex" | "cxr" | "lazy" | "load" | "process-context"
+            | "repl" | "time" | "case-lambda" | "eval" | "r5rs"
+        ),
+        // The chibi r7rs-tests.scm corpus imports `(chibi test)`.
+        // We preload that shim into the global env outside the
+        // library system, so the import is a no-op.
+        [s, b] if s == "chibi" && b == "test" => true,
+        // Same for SRFI 64 (the upstream test framework chibi's
+        // suite was derived from).
+        [s, b] if s == "srfi" && b == "64" => true,
+        _ => false,
+    }
 }
 
 /// Static feature list returned by `(features)` and consulted by

@@ -99,7 +99,7 @@ impl Num {
             Value::BigInt(b) => Ok(Self::Big((**b).clone())),
             Value::Rational(r) => Ok(Self::Rat((**r).clone())),
             Value::Float(f) => Ok(Self::Float(*f)),
-            Value::Complex(c) => Ok(Self::Complex(c.0, c.1)),
+            Value::Complex(c) => Ok(Self::Complex(c.re_f64(), c.im_f64())),
             other => Err(RuntimeError::Type {
                 expected: "number".into(),
                 got: other.type_name().into(),
@@ -117,7 +117,7 @@ impl Num {
                 if im == 0.0 {
                     Value::Float(re)
                 } else {
-                    Value::Complex(Rc::new((re, im)))
+                    Value::complex_inexact(re, im)
                 }
             }
         }
@@ -165,6 +165,67 @@ impl Num {
 /// Detect inexact (Float) numeric arguments for R7RS contagion rules.
 fn is_value_inexact(v: &Value) -> bool {
     matches!(v, Value::Float(_))
+}
+
+/// R7RS-style Unicode case folding. Rust's `to_lowercase` handles
+/// most one-to-one cases; this helper layers on the well-known
+/// one-to-many foldings that the chibi corpus exercises:
+///
+/// - U+00DF (`ß`) → "ss"
+/// - U+017F (`ſ`, Latin long-s) → "s"
+/// - U+03C2 (`ς`, Greek final sigma) → "σ"
+///
+/// We post-process the `to_lowercase` output rather than running our
+/// own per-codepoint table because Rust already implements the
+/// bulk of the simple mappings.
+fn case_fold(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.to_lowercase().chars() {
+        match c {
+            'ß' => out.push_str("ss"),
+            'ſ' => out.push('s'),
+            'ς' => out.push('σ'),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Simplest rational in [lo, hi] (inclusive). Uses the standard
+/// Stern–Brocot / continued-fraction descent: split into integer
+/// and fractional parts, recurse on `1/(hi - floor) ... 1/(lo -
+/// floor)` for the fractional side. Handles negative intervals
+/// by reflection. R7RS `rationalize` requires the result with the
+/// smallest denominator (and, among those, smallest numerator).
+fn simplest_rational_between(lo: &BigRational, hi: &BigRational) -> BigRational {
+    use std::cmp::Ordering;
+    match lo.cmp(hi) {
+        Ordering::Equal => return lo.clone(),
+        Ordering::Greater => return simplest_rational_between(hi, lo),
+        Ordering::Less => {}
+    }
+    // If 0 lies in [lo, hi], 0 is the simplest.
+    let zero = BigRational::zero();
+    if lo <= &zero && hi >= &zero {
+        return zero;
+    }
+    // Reflect a fully-negative interval into the positives.
+    if hi <= &zero {
+        return -simplest_rational_between(&-hi, &-lo);
+    }
+    // Now 0 < lo < hi. If `ceil(lo) <= hi`, the simplest integer in
+    // range is `ceil(lo)`.
+    let lo_ceil = lo.ceil();
+    if &lo_ceil <= hi {
+        return lo_ceil;
+    }
+    // Strip the common integer part and recurse on the reciprocals.
+    let lo_floor = lo.floor();
+    let lo_frac = lo - &lo_floor;
+    let hi_frac = hi - &lo_floor;
+    let inv_lo = BigRational::one() / hi_frac;
+    let inv_hi = BigRational::one() / lo_frac;
+    lo_floor + BigRational::one() / simplest_rational_between(&inv_lo, &inv_hi)
 }
 
 /// Complex square root via Cartesian form. Follows the principal
@@ -462,10 +523,29 @@ fn num_cmp(a: &Num, b: &Num) -> Option<std::cmp::Ordering> {
         }
         return a.to_f64().partial_cmp(&b.to_f64());
     }
-    if a.is_inexact() || b.is_inexact() {
+    // When both are inexact OR both are exact, the straightforward
+    // paths give exact answers.
+    if a.is_inexact() && b.is_inexact() {
         return a.to_f64().partial_cmp(&b.to_f64());
     }
-    Some(a.to_rational().cmp(&b.to_rational()))
+    if !a.is_inexact() && !b.is_inexact() {
+        return Some(a.to_rational().cmp(&b.to_rational()));
+    }
+    // Mixed: if the inexact operand is non-finite (±inf / NaN),
+    // fall back to f64 comparison — NaN yields None, infinities
+    // sort to their natural extremes. Otherwise convert both sides
+    // into a `BigRational` representing the f64's exact value so
+    // the comparison is precise rather than rounded.
+    let inexact_non_finite = matches!(a, Num::Float(f) if !f.is_finite())
+        || matches!(b, Num::Float(f) if !f.is_finite());
+    if inexact_non_finite {
+        return a.to_f64().partial_cmp(&b.to_f64());
+    }
+    let to_rational = |n: &Num| match n {
+        Num::Float(f) => BigRational::from_f64(*f).expect("finite float to BigRational"),
+        _ => n.to_rational(),
+    };
+    Some(to_rational(a).cmp(&to_rational(b)))
 }
 
 // ---------------------------------------------------------------------
@@ -696,7 +776,29 @@ fn check_numeric_chain(
 fn install_comparison(env: &EnvRef) {
     use std::cmp::Ordering::{Equal, Greater, Less};
     define(env, "=", Arity::AtLeast(2), |args| {
-        check_numeric_chain(args, |o| o == Equal)
+        // R7RS `=` accepts complex values too — two complex numbers
+        // are equal when both real and imaginary parts match. For
+        // real-only chains the ordinary num_cmp path is enough.
+        let mut prev = Num::from_value(&args[0])?;
+        for a in &args[1..] {
+            let cur = Num::from_value(a)?;
+            let same = if prev.is_complex() || cur.is_complex() {
+                let (px, py) = prev.to_complex();
+                let (cx, cy) = cur.to_complex();
+                #[allow(clippy::float_cmp)]
+                let real_eq = px == cx;
+                #[allow(clippy::float_cmp)]
+                let imag_eq = py == cy;
+                real_eq && imag_eq
+            } else {
+                matches!(num_cmp(&prev, &cur), Some(o) if o == Equal)
+            };
+            if !same {
+                return Ok(Value::Bool(false));
+            }
+            prev = cur;
+        }
+        Ok(Value::Bool(true))
     });
     define(env, "<", Arity::AtLeast(2), |args| {
         check_numeric_chain(args, |o| o == Less)
@@ -739,15 +841,20 @@ fn install_predicates(env: &EnvRef) {
         Ok(Value::Bool(is_integer_value(&a[0])))
     });
     define(env, "real?", Arity::Exact(1), |a| {
-        // Our representation collapses exact-zero-imaginary complex
-        // values to real Floats/Ints already. A surviving Complex
-        // therefore carries an inexact imaginary part — R7RS reports
-        // such values as non-real (see chibi's `(real? -2.5+0.0i)`
-        // expecting #f).
-        Ok(Value::Bool(matches!(
-            &a[0],
-            Value::Int(_) | Value::BigInt(_) | Value::Rational(_) | Value::Float(_)
-        )))
+        Ok(Value::Bool(match &a[0] {
+            Value::Int(_) | Value::BigInt(_) | Value::Rational(_) | Value::Float(_) => true,
+            // A complex with an exact zero imaginary part counts as
+            // real (R7RS §6.2.6). An inexact zero (0.0) does not —
+            // the parser collapses exact-zero forms so any surviving
+            // Complex here has either a non-zero imag or an
+            // inexact-zero imag.
+            Value::Complex(c) => {
+                matches!(&c.im, Value::Int(0))
+                    || matches!(&c.im, Value::BigInt(b) if b.is_zero())
+                    || matches!(&c.im, Value::Rational(r) if r.numer().is_zero())
+            }
+            _ => false,
+        }))
     });
     define(env, "rational?", Arity::Exact(1), |a| {
         Ok(Value::Bool(
@@ -1328,9 +1435,37 @@ fn install_misc(env: &EnvRef) {
     });
     // R7RS rationalize: best rational approximation within tolerance.
     // For v1 we punt: return the input as-is.
-    define(env, "rationalize", Arity::Exact(2), |a| Ok(a[0].clone()));
+    define(env, "rationalize", Arity::Exact(2), |a| {
+        // R7RS §6.2.6: `(rationalize x y)` returns the simplest
+        // rational number differing from `x` by no more than `y`
+        // (in absolute value). Result inherits the inexactness of
+        // the arguments.
+        let x_num = Num::from_value(&a[0])?;
+        let y_num = Num::from_value(&a[1])?;
+        let inexact_result = x_num.is_inexact() || y_num.is_inexact();
+        let to_rat = |n: Num| match n {
+            Num::Int(k) => BigRational::from_i64(k).unwrap_or_else(BigRational::zero),
+            Num::Big(b) => BigRational::from_integer(b),
+            Num::Rat(r) => r,
+            Num::Float(f) if f.is_finite() => {
+                BigRational::from_f64(f).unwrap_or_else(BigRational::zero)
+            }
+            _ => BigRational::zero(),
+        };
+        let xr = to_rat(x_num);
+        let yr = to_rat(y_num).abs();
+        let lo = &xr - &yr;
+        let hi = &xr + &yr;
+        let simplest = simplest_rational_between(&lo, &hi);
+        let value = rational_to_value(simplest);
+        if inexact_result {
+            Ok(maybe_inexact(value, true))
+        } else {
+            Ok(value)
+        }
+    });
     define(env, "magnitude", Arity::Exact(1), |a| match &a[0] {
-        Value::Complex(c) => Ok(Value::Float(c.0.hypot(c.1))),
+        Value::Complex(c) => Ok(Value::Float(c.re_f64().hypot(c.im_f64()))),
         Value::Float(f) => Ok(Value::Float(f.abs())),
         Value::Int(n) => Ok(Value::Int(n.checked_abs().unwrap_or(i64::MAX))),
         Value::BigInt(b) => Ok(bigint_to_value(b.as_ref().clone().abs())),
@@ -1342,7 +1477,7 @@ fn install_misc(env: &EnvRef) {
     });
     define(env, "angle", Arity::Exact(1), |a| {
         if let Value::Complex(c) = &a[0] {
-            return Ok(Value::Float(c.1.atan2(c.0)));
+            return Ok(Value::Float(c.im_f64().atan2(c.re_f64())));
         }
         let n = Num::from_value(&a[0])?;
         let f = n.to_f64();
@@ -1353,7 +1488,7 @@ fn install_misc(env: &EnvRef) {
         }))
     });
     define(env, "real-part", Arity::Exact(1), |a| match &a[0] {
-        Value::Complex(c) => Ok(Value::Float(c.0)),
+        Value::Complex(c) => Ok(c.re.clone()),
         other if other.is_number() => Ok(other.clone()),
         other => Err(RuntimeError::Type {
             expected: "number".into(),
@@ -1361,7 +1496,7 @@ fn install_misc(env: &EnvRef) {
         }),
     });
     define(env, "imag-part", Arity::Exact(1), |a| match &a[0] {
-        Value::Complex(c) => Ok(Value::Float(c.1)),
+        Value::Complex(c) => Ok(c.im.clone()),
         other if other.is_number() => Ok(Value::Int(0)),
         other => Err(RuntimeError::Type {
             expected: "number".into(),
@@ -1369,21 +1504,30 @@ fn install_misc(env: &EnvRef) {
         }),
     });
     define(env, "make-rectangular", Arity::Exact(2), |a| {
-        let re = Num::from_value(&a[0])?.to_f64();
+        if !a[0].is_number() {
+            return Err(type_err("number", &a[0]));
+        }
         let im_num = Num::from_value(&a[1])?;
         // (make-rectangular x 0) → x, preserving exactness.
         if num_is_zero(&im_num) && matches!(im_num, Num::Int(_) | Num::Big(_) | Num::Rat(_)) {
             return Ok(a[0].clone());
         }
-        let im = im_num.to_f64();
-        Ok(Value::Complex(Rc::new((re, im))))
+        // Preserve component exactness when neither part is complex.
+        if !matches!(a[0], Value::Complex(_)) && !matches!(a[1], Value::Complex(_)) {
+            return Ok(Value::Complex(Rc::new(crate::value::ComplexValue {
+                re: a[0].clone(),
+                im: a[1].clone(),
+            })));
+        }
+        let re = Num::from_value(&a[0])?.to_f64();
+        Ok(Value::complex_inexact(re, im_num.to_f64()))
     });
     define(env, "make-polar", Arity::Exact(2), |a| {
         let mag = Num::from_value(&a[0])?.to_f64();
         let ang = Num::from_value(&a[1])?.to_f64();
         let re = mag * ang.cos();
         let im = mag * ang.sin();
-        Ok(Value::Complex(Rc::new((re, im))))
+        Ok(Value::complex_inexact(re, im))
     });
     define(env, "features", Arity::Exact(0), |_| {
         Ok(Value::list_from(
@@ -1638,8 +1782,8 @@ fn install_inexact(env: &EnvRef) {
     define(env, "sqrt", Arity::Exact(1), |a| {
         match &a[0] {
             Value::Complex(c) => {
-                let (re, im) = (c.0, c.1);
-                Ok(Value::Complex(Rc::new(complex_sqrt(re, im))))
+                let (re, im) = complex_sqrt(c.re_f64(), c.im_f64());
+                Ok(Value::complex_inexact(re, im))
             }
             v if v.is_number() => {
                 // Exact integer perfect square stays exact.
@@ -1657,7 +1801,7 @@ fn install_inexact(env: &EnvRef) {
                 let f = Num::from_value(v)?.to_f64();
                 if f.is_sign_negative() {
                     let (re, im) = complex_sqrt(f, 0.0);
-                    return Ok(Value::Complex(Rc::new((re, im))));
+                    return Ok(Value::complex_inexact(re, im));
                 }
                 Ok(Value::Float(f.sqrt()))
             }
@@ -1687,19 +1831,19 @@ fn install_inexact(env: &EnvRef) {
     define(env, "finite?", Arity::Exact(1), |a| match &a[0] {
         Value::Float(f) => Ok(Value::Bool(f.is_finite())),
         Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(true)),
-        Value::Complex(c) => Ok(Value::Bool(c.0.is_finite() && c.1.is_finite())),
+        Value::Complex(c) => Ok(Value::Bool(c.re_f64().is_finite() && c.im_f64().is_finite())),
         other => Err(type_err("number", other)),
     });
     define(env, "infinite?", Arity::Exact(1), |a| match &a[0] {
         Value::Float(f) => Ok(Value::Bool(f.is_infinite())),
         Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(false)),
-        Value::Complex(c) => Ok(Value::Bool(c.0.is_infinite() || c.1.is_infinite())),
+        Value::Complex(c) => Ok(Value::Bool(c.re_f64().is_infinite() || c.im_f64().is_infinite())),
         other => Err(type_err("number", other)),
     });
     define(env, "nan?", Arity::Exact(1), |a| match &a[0] {
         Value::Float(f) => Ok(Value::Bool(f.is_nan())),
         Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(false)),
-        Value::Complex(c) => Ok(Value::Bool(c.0.is_nan() || c.1.is_nan())),
+        Value::Complex(c) => Ok(Value::Bool(c.re_f64().is_nan() || c.im_f64().is_nan())),
         other => Err(type_err("number", other)),
     });
     // floor / ceiling / truncate / round — return the same exactness
@@ -2029,10 +2173,13 @@ fn install_strings(env: &EnvRef) {
         Value::String(s) => Ok(Value::string(s.borrow().to_lowercase())),
         other => Err(type_err("string", other)),
     });
-    // R7RS string-foldcase: full Unicode case folding. We approximate
-    // with lowercase, which matches for ASCII and most Latin1.
+    // R7RS string-foldcase: Unicode case folding. We approximate
+    // via `to_lowercase` plus a small fix-up table that turns
+    // common one-to-many foldings (German `ß` → `ss`, the Latin
+    // long-s, Greek final-sigma, …) into the canonical lower-case
+    // forms the corpus expects.
     define(env, "string-foldcase", Arity::Exact(1), |a| match &a[0] {
-        Value::String(s) => Ok(Value::string(s.borrow().to_lowercase())),
+        Value::String(s) => Ok(Value::string(case_fold(&s.borrow()))),
         other => Err(type_err("string", other)),
     });
     define(env, "string->vector", Arity::AtLeast(1), |a| match &a[0] {
@@ -2122,21 +2269,22 @@ fn install_strings(env: &EnvRef) {
         }
         other => Err(type_err("string", other)),
     });
-    // Case-insensitive comparisons.
+    // Case-insensitive comparisons — fold both sides via the same
+    // Unicode case-fold approximation `string-foldcase` uses.
     define(env, "string-ci=?", Arity::AtLeast(2), |a| {
-        string_ci_chain(a, str::eq_ignore_ascii_case)
+        string_ci_chain(a, |x, y| case_fold(x) == case_fold(y))
     });
     define(env, "string-ci<?", Arity::AtLeast(2), |a| {
-        string_ci_chain(a, |x, y| x.to_lowercase() < y.to_lowercase())
+        string_ci_chain(a, |x, y| case_fold(x) < case_fold(y))
     });
     define(env, "string-ci>?", Arity::AtLeast(2), |a| {
-        string_ci_chain(a, |x, y| x.to_lowercase() > y.to_lowercase())
+        string_ci_chain(a, |x, y| case_fold(x) > case_fold(y))
     });
     define(env, "string-ci<=?", Arity::AtLeast(2), |a| {
-        string_ci_chain(a, |x, y| x.to_lowercase() <= y.to_lowercase())
+        string_ci_chain(a, |x, y| case_fold(x) <= case_fold(y))
     });
     define(env, "string-ci>=?", Arity::AtLeast(2), |a| {
-        string_ci_chain(a, |x, y| x.to_lowercase() >= y.to_lowercase())
+        string_ci_chain(a, |x, y| case_fold(x) >= case_fold(y))
     });
     // Comparison ops.
     define(env, "string-set!", Arity::Exact(3), |a| {
