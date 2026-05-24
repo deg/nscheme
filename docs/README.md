@@ -1,12 +1,8 @@
 # nscheme — design documentation
 
-This directory holds architecture decision records (ADRs) and other
-long-form design notes for the `nscheme` Scheme interpreter.
+This directory holds architecture decision records (ADRs) and other long-form design notes for the `nscheme` Scheme interpreter.
 
-Per-task implementation notes live in beads (`bd show <id>`) — only
-durable decisions land here. An ADR is added when a decision is
-expensive to change later or affects how multiple modules fit
-together.
+Per-task implementation notes live in beads (`bd show <id>`) — only durable decisions land here. An ADR is added when a decision is expensive to change later or affects how multiple modules fit together.
 
 ## Index
 
