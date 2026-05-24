@@ -1,6 +1,6 @@
 # Building nscheme: An Experiment in AI-Assisted Implementation
 
-I started this on a Thursday afternoon, very part-time. By Sunday morning the repository held a working Scheme interpreter — 13,000 lines of Rust, passing every assertion in the standard R7RS conformance suite that ships with chibi-scheme [[Insert link]]. Claude had spent maybe six hours on it. I had personally spent about ninety minutes.
+I started this on a Thursday afternoon, very part-time. By Sunday morning the repository held a working Scheme interpreter — 13,000 lines of Rust, passing every assertion in the standard R7RS conformance suite that ships with [chibi-scheme](https://github.com/ashinn/chibi-scheme). Claude had spent maybe six hours on it. I had personally spent about ninety minutes.
 
 That's the headline. The rest of this is the texture: what worked, where I had to push, what I learned, and what was already true that I just got to confirm.
 
@@ -24,7 +24,7 @@ Most important, I wanted a solid language in which I have never programmed mysel
 
 ## Thursday afternoon
 
-I started by setting Claude's working environment. I use beads [[insert link]]— a DB-backed issue tracker meant to be shared between humans and agents — to break work into named units and tie commits to them. Then I took the brakes off:
+I started by setting Claude's working environment. I use [beads](https://github.com/gastownhall/beads) — a DB-backed issue tracker meant to be shared between humans and agents — to break work into named units and tie commits to them. Then I took the brakes off:
 
 > 1) You may commit without my authorization for each commit.
 > 2) You should commit at least once per bead.
@@ -129,4 +129,4 @@ But the result was not free, and it was not autonomous in the strongest sense. T
 
 If the question was "can an AI agent implement R7RS-small from a fresh repo?" — the answer is yes. If the question was "can it do so without a human deciding what 'finished' means?" — the answer is no, at least not with this agent on this day. The interesting result is how much of the gap is technical capability and how much is calibration. In this project, it was mostly calibration. The agent could do the work. It just had to be asked to.
 
-The instinct is old. The partner is new. [[I don't like this closing line]]
+Most of my ninety minutes were spent saying "not yet." That, more than anything else, was the work.
