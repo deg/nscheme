@@ -1,16 +1,41 @@
 //! Lexer for R7RS-small Scheme source text.
 //!
-//! Converts a UTF-8 source string into a stream of [`Token`]s. The lexer
-//! is permissive about what it emits (e.g. it preserves the raw text of
-//! numbers rather than parsing them to a numeric type) so that downstream
-//! beads — particularly the numeric tower (nscheme-c92) — can decide how
-//! to interpret each lexeme. Errors carry a [`Span`] for diagnostics.
+//! Converts a UTF-8 source string into a stream of [`Token`]s.
 //!
-//! The grammar implemented here corresponds to R7RS §7.1.1 (lexical
-//! syntax). Complex number syntax (`a+bi`, `a@b`) is recognized but
-//! parsed lazily — the lexer emits the entire complex literal as a
-//! single [`TokenKind::Number`] lexeme and lets the numeric tower decide
-//! whether to support it.
+//! ## What you'll learn here
+//!
+//! - **Scheme**: the lexical grammar of R7RS-small — R7RS §7.1.1 in
+//!   working code. Pay attention to the things Scheme doesn't share
+//!   with C-family languages: datum comments (`#;`), block comments
+//!   that nest, the four datum-label forms (`#N=`, `#N#`,
+//!   `#!fold-case`, `#!no-fold-case`), the long peculiar-identifier
+//!   tail (`+inf.0`, `+`, `...`, `->foo`, …), and the slightly
+//!   intricate numeric grammar including rationals (`3/4`) and
+//!   complex literals (`1+2i`, `3@1.57`).
+//! - **Writing a hand-coded lexer in Rust**: a state-machine style
+//!   driven by `peek_char` / `advance` / `skip_trivia`. No external
+//!   lexer generator. The result is one byte-indexed walk over the
+//!   source plus a handful of small helpers per token kind.
+//! - **`Span`-bearing errors**: every [`LexError`] variant carries a
+//!   [`Span`] so the caller can render a position-aware diagnostic.
+//!   This pattern shows up again in [`crate::parse`].
+//!
+//! ## Read alongside
+//!
+//! - [`crate::parse`] — consumes our [`Token`] stream and builds
+//!   [`Value`](crate::value::Value)s. The lexer/parser split is the
+//!   only place in the interpreter where Scheme code exists as a
+//!   stream of bytes; from the parser onward it's a tree of values.
+//! - R7RS §7.1.1 (formal lexical syntax).
+//!
+//! ## Design choice: permissive numbers
+//!
+//! The lexer is *permissive* about numeric literals — it captures
+//! the radix and the raw text body but does not parse the body into
+//! an `i64` / `f64` / `BigInt` / rational. The downstream numeric
+//! tower in [`crate::parse`] / [`crate::value`] makes those
+//! decisions. That keeps the lexer's grammar simple and lets the
+//! numeric tower evolve without re-coordinating with the lexer.
 
 use std::fmt;
 

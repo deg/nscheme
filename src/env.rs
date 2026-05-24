@@ -1,23 +1,38 @@
 //! Lexical environment for the evaluator.
 //!
-//! An [`Env`] is a single frame plus an optional parent. Frames hold a
-//! `Symbol` → `Value` map; the parent chain models R7RS lexical scope.
-//! Closures keep their defining environment alive by cloning an
-//! [`EnvRef`] (an `Rc<Env>`); environments are reference-counted so they
-//! can outlive the syntactic block they originated in.
+//! An [`Env`] is the data structure that maps Scheme identifiers
+//! (symbols) to values within a particular scope.
 //!
-//! Semantics implemented here:
+//! ## What you'll learn here
 //!
-//! - `define` always binds in the *current* frame (R7RS §5.3.2). Calling
-//!   `define` for a name that already exists in the current frame
-//!   replaces the binding.
-//! - `set!` mutates the *nearest enclosing* binding. If no such binding
-//!   exists, it raises [`RuntimeError::Undefined`] (R7RS §4.1.6).
-//! - `lookup` walks the parent chain.
+//! - **Scheme**: how lexical scope is modeled — a chain of frames
+//!   with `define` binding in the current frame and `set!`
+//!   mutating the nearest enclosing one. The same model handles
+//!   global definitions, `let` bodies, lambda parameters, and
+//!   `letrec` mutual recursion.
+//! - **Rust**: a second appearance of the `Rc<RefCell<T>>` pattern
+//!   (introduced in `value.rs` at `Pair`), this time wrapping a
+//!   `HashMap`. Closures hang on to an `Rc<Env>` to keep their
+//!   defining scope alive; the `RefCell` lets multiple closures
+//!   over the same scope observe each other's mutations — the
+//!   condition `letrec` and mutual recursion require.
 //!
-//! The implementation uses `RefCell` for the frame so multiple
-//! `EnvRef`s sharing the same frame (e.g. closures defined in the same
-//! scope) all observe each other's mutations.
+//! ## Read alongside
+//!
+//! - `value.rs` — defines [`Symbol`](crate::value::Symbol) (the
+//!   keys) and [`Value`](crate::value::Value) (the values).
+//! - `eval.rs` — every special form that creates a scope
+//!   (`lambda`, `let`, …) calls [`Env::extend`].
+//! - R7RS §5.3.2 (definitions), §4.1.6 (`set!`).
+//!
+//! ## Semantics in one paragraph
+//!
+//! `define` always binds in the *current* frame (so a top-level
+//! `define` inside a `let` body creates a new local binding,
+//! shadowing any same-named outer binding). `set!` walks up the
+//! parent chain to mutate the *nearest enclosing* binding, raising
+//! [`RuntimeError::Undefined`] if no such binding exists. `lookup`
+//! also walks the parent chain. That's the whole module.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

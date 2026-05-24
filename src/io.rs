@@ -1,16 +1,62 @@
 //! Port I/O primitives.
 //!
-//! Implements the textual port subset of R7RS-small §6.13:
-//! `current-input-port`, `current-output-port`, `current-error-port`,
-//! `open-input-{string,file}`, `open-output-{string,file}`,
-//! `get-output-string`, `close-port`, `read`, `read-char`, `peek-char`,
-//! `read-line`, `read-string`, `eof-object?`, `eof-object`,
-//! `write`, `display`, `newline`, `write-char`, `write-string`,
-//! `with-{input,output}-from-file`, `file-exists?`, `delete-file`,
-//! plus the type predicates `input-port?`, `output-port?`,
-//! `textual-port?`, `binary-port?`.
+//! ## What you'll learn here
 //!
-//! Binary ports and `read-bytevector` are deferred.
+//! - **Scheme**: how R7RS models I/O. The [`Port`](crate::value::Port)
+//!   value type is a tagged union of "input from somewhere" or
+//!   "output to somewhere"; the somewhere can be stdin/stdout, a
+//!   string in memory, or a file. Once you have a port, the same
+//!   procedures (`read`, `read-char`, `write`, `display`) work
+//!   uniformly across all of them. R7RS §6.13.
+//! - The "current port" concept: `current-input-port`,
+//!   `current-output-port`, `current-error-port` are
+//!   [`Parameter`](crate::value::Procedure::Parameter) objects. A
+//!   procedure that wants to write to "the output" reads the
+//!   current parameter value rather than taking a port argument.
+//!   `with-output-to-file` `parameterize`s the current-output port
+//!   for the dynamic extent of a thunk — the surrounding code
+//!   never sees the swap.
+//! - **Rust note**: `Rc<RefCell<Port>>` is again the right wrapper
+//!   for a Scheme value that is shareable (passed around as a
+//!   first-class value) and mutable (each `read-char` advances a
+//!   position cursor). The pattern from `value.rs::Pair` repeats
+//!   here exactly.
+//!
+//! ## Catalog
+//!
+//! This file is another flat catalog of primitives, registered via
+//! [`install_io`]. Skim by name. R7RS §6.13.1 has the spec for
+//! each one:
+//!
+//!   port type tests          `port?`, `input-port?`,
+//!                            `output-port?`, `textual-port?`,
+//!                            `binary-port?`
+//!   open / close             `open-input-string`,
+//!                            `open-output-string`,
+//!                            `open-input-file`,
+//!                            `open-output-file`,
+//!                            `close-port`
+//!   string-port extraction   `get-output-string`,
+//!                            `get-output-bytevector`
+//!   read                     `read`, `read-char`, `peek-char`,
+//!                            `read-line`, `read-string`,
+//!                            `read-u8`, `peek-u8`,
+//!                            `read-bytevector`,
+//!                            `read-bytevector!`
+//!   eof                      `eof-object?`, `eof-object`
+//!   write                    `write`, `write-shared`,
+//!                            `write-simple`, `display`,
+//!                            `newline`, `write-char`,
+//!                            `write-string`, `write-u8`,
+//!                            `write-bytevector`
+//!   file ops                 `file-exists?`, `delete-file`,
+//!                            `with-input-from-file`,
+//!                            `with-output-to-file`
+//!
+//! ## Read alongside
+//!
+//! - [`crate::value::Port`] — the underlying enum and its variants.
+//! - R7RS §6.13.
 
 #![allow(clippy::too_many_lines)]
 

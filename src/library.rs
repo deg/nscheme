@@ -1,13 +1,36 @@
 //! R7RS-small library / module system (§5.6).
 //!
-//! Implements `define-library`, `import`, and `cond-expand` plus the
-//! ability for the implementation-supplied libraries (`(scheme base)`,
-//! `(scheme write)`, …) to be imported as no-ops because nscheme
-//! already installs their bindings in the global env at startup.
+//! ## What you'll learn here
 //!
-//! User-defined libraries are registered in a thread-local registry
-//! keyed by the canonical library name (a `Vec<String>` of identifier
-//! names).
+//! - **Scheme**: how R7RS's `define-library` works. A library is a
+//!   named bundle of bindings with an explicit export list; user
+//!   code names the library with a symbol-list path (`(scheme
+//!   base)`, `(srfi 1)`) and the `import` form copies the exported
+//!   bindings into the importing scope.
+//! - **Two kinds of library** in this interpreter:
+//!     - **Built-in libraries** (`(scheme base)`, `(scheme
+//!       write)`, …). Their bindings are already installed in the
+//!       global env at startup by [`crate::builtins::install_base`]
+//!       and [`crate::io::install_io`], so an `import` of these
+//!       library names is a no-op. [`is_builtin_library`] is the
+//!       recognition function.
+//!     - **User libraries** defined via `define-library`. Their
+//!       bindings go into a thread-local registry keyed by the
+//!       canonical name, then get copied to the importing env on
+//!       `import`.
+//!
+//! ## Read alongside
+//!
+//! - [`crate::eval`] — `step_define_library`, `step_import`, and
+//!   `step_cond_expand` are in there.
+//! - R7RS §5.6.
+//!
+//! ## A known gap
+//!
+//! Import copies *values*, not shared cells. Mutations to an
+//! imported binding don't propagate back to the library; mutations
+//! in the library after import don't propagate to importers. See
+//! the open bead `nscheme-q1c`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

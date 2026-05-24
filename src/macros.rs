@@ -1,27 +1,55 @@
 //! `syntax-rules` macros (R7RS §4.3).
 //!
-//! Implements hygienic pattern-matching macros via the textbook
-//! alpha-renaming approach (KFFD):
+//! ## What you'll learn here
 //!
-//! 1. Each clause of the macro has a *pattern* and a *template*.
-//! 2. Expansion picks the first clause whose pattern matches the input,
-//!    collecting pattern-variable bindings.
-//! 3. Identifiers introduced by the template that appear in *binding
-//!    positions* (`let`, `lambda`, `define`, etc.) are renamed with a
-//!    fresh `gensym` to avoid capturing user-supplied identifiers.
-//! 4. Pattern variables are substituted from the bindings; `...` in
-//!    template position splices sub-lists collected by `...` in pattern
-//!    position.
-//! 5. The expanded form is then re-evaluated through `step_eval`, so
-//!    nested macro calls expand naturally.
+//! - **Scheme**: how `syntax-rules` works. A user-defined macro is a
+//!   list of *clauses*, each a `(pattern template)` pair. To expand
+//!   a macro call, walk the clauses in order; the first whose
+//!   pattern matches the call binds *pattern variables* to bits of
+//!   the call, then instantiates the template with those bindings
+//!   substituted in. The ellipsis `...` matches and emits
+//!   sequences. R7RS calls this "low-level macros," somewhat
+//!   misleadingly — it's actually the high-level, declarative
+//!   alternative to procedural macros.
+//! - **Hygiene** — the property that an identifier introduced by a
+//!   macro template can't accidentally collide with a same-named
+//!   identifier at the call site. Two mechanisms together give us
+//!   hygiene:
+//!     1. **Gensym for template-introduced binders**: when the
+//!        template introduces a `let`/`lambda`/`define` binding,
+//!        we rename it with a fresh symbol so user code at the
+//!        call site can't shadow it. This handles the classic
+//!        `swap!` example (R7RS §4.3.2).
+//!     2. **`SyntaxRef` wrapping for free identifiers**: when the
+//!        template references an identifier *not* in its pattern
+//!        variables, we wrap it in a [`Value::SyntaxRef`](
+//!        crate::value::Value::SyntaxRef) carrying the macro's
+//!        definition-site env. The evaluator then resolves that
+//!        identifier in the def-site env, not the call site's.
+//!        This handles "bound-identifier=?" cases where a user
+//!        shadows `let` or `+` after the macro was defined.
+//! - **`VarKey` (this module's contribution to hygiene)**: pattern
+//!   variables are stored under a key that includes the
+//!   identifier's "scope," not just its name. So when a macro
+//!   substitutes a user-supplied `x` into a template that *also*
+//!   contains a template-introduced `x`, the two `x`s are
+//!   distinct keys and don't collide.
 //!
-//! **Limitations documented for v1** (each is a deliberate scope cut):
-//! - Free identifiers in templates use the *call site's* environment,
-//!   not the *macro definition site's*. That means `(define-syntax m
-//!   (syntax-rules () ((_ x) (+ x 1))))` followed by `(let ((+ -)) (m
-//!   5))` returns 4, not 6. Most amateur Schemes have this bug;
-//!   fixing it requires syntactic closures / sets of scopes.
-//! - Nested ellipsis depth >1 is not supported.
+//! ## Read in this order
+//!
+//! 1. The [`SyntaxRules`] struct and [`expand`] function — the
+//!    entry point.
+//! 2. The "Pattern matching" section.
+//! 3. The "Template instantiation" section.
+//! 4. The "Hygiene" section (binder collection / renaming).
+//!
+//! ## Read alongside
+//!
+//! - [`crate::value::Value::SyntaxRef`] — the wrapping that carries
+//!   def-site env through expansion.
+//! - [`docs/0003-syntax-rules-hygiene.md`](
+//!   ../../docs/0003-syntax-rules-hygiene.md) — design rationale.
+//! - R7RS §4.3.
 
 // The walkers here are inherently long — they enumerate syntactic
 // forms — and the helper Matches/Bindings types have method-free
@@ -211,6 +239,17 @@ pub fn expand(rules: &SyntaxRules, call: &Value) -> Result<Value, EvalError> {
 // ---------------------------------------------------------------------
 // Pattern matching
 // ---------------------------------------------------------------------
+//
+// A pattern is a tree of [`Value`]s that may contain pattern
+// variables (any identifier not in the literals list, not `_`, and
+// not the ellipsis identifier). Matching a pattern against an input
+// either succeeds — populating a [`Bindings`] map from pattern
+// variables to matched sub-values — or fails. Matching a pattern
+// `(p1 p2 ...)` against a list `(v1 v2 ...)` walks both in lockstep.
+// The ellipsis case is the tricky one: pattern `(a b ...)` against
+// `(1 2 3 4)` matches `a=1` and `b=[2,3,4]` — `b` becomes a
+// sequence-valued binding, distinguished from single-valued
+// bindings by the [`Match::Multi`] variant.
 
 #[derive(Clone, Debug, Default)]
 struct Bindings(HashMap<VarKey, Match>);
@@ -488,6 +527,20 @@ fn collect_pattern_vars_into(
 // ---------------------------------------------------------------------
 // Template instantiation
 // ---------------------------------------------------------------------
+//
+// Now we walk the template, producing the expanded form. Three
+// rules:
+//
+//   - A pattern variable reference gets replaced by its bound value
+//     (or, in the ellipsis case, expanded across each repetition).
+//   - A template binder gets renamed per the `renames` table —
+//     that's hygiene step (1) (preventing user code at the call
+//     site from capturing template-introduced bindings).
+//   - Any other identifier is wrapped in a
+//     [`Value::SyntaxRef`](crate::value::Value::SyntaxRef) carrying
+//     the macro's def_env — that's hygiene step (2) (free
+//     identifiers resolve at the macro's def site, not the call
+//     site).
 
 fn instantiate(
     template: &Value,

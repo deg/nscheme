@@ -4,7 +4,9 @@ This directory holds architecture decision records (ADRs) and other long-form de
 
 Per-task implementation notes live in beads (`bd show <id>`) — only durable decisions land here. An ADR is added when a decision is expensive to change later or affects how multiple modules fit together.
 
-## Index
+For a reading guide to the source code, see [`../TOUR.md`](../TOUR.md).
+
+## Architecture decision records
 
 - [0001 — Tree-walking interpreter with explicit step-loop](0001-tree-walking-interpreter.md)
 - [0002 — Numeric tower (Int / BigInt / Rational / Float)](0002-numeric-tower.md)
@@ -12,3 +14,7 @@ Per-task implementation notes live in beads (`bd show <id>`) — only durable de
 - [0004 — Continuations as cloned frame stacks](0004-continuations.md)
 - [0005 — Exception handling via the frame stack](0005-exception-handling.md)
 - [0006 — Library / module system](0006-library-system.md)
+
+## Style guide
+
+- [STYLE.md](STYLE.md) — conventions for in-code teaching commentary. Tells you what each comment in the source is trying to accomplish.

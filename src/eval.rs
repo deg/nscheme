@@ -1,33 +1,63 @@
-//! Tree-walking evaluator with an explicit step-loop.
+//! The evaluator. This is the heart of the interpreter.
 //!
-//! See [`docs/0001-tree-walking-interpreter.md`](../../docs/0001-tree-walking-interpreter.md)
-//! for the architectural rationale. In short: this is **not** a
-//! recursive `fn eval(expr, env) -> Value`. It is an iterative loop
-//! over a `Step` state with a `Vec<Frame>` continuation stack.
+//! ## What you'll learn here
 //!
-//! That shape is what makes tail-call optimization (R7RS §3.5) free —
-//! tail positions transition `Step::Eval(tail_expr, env)` *without*
-//! pushing a frame — and what makes `call-with-current-continuation`
-//! a `frames.clone()` later (T17 / `nscheme-0xn`).
+//! - **Tree-walking evaluation**: how to turn parsed source (which in
+//!   nscheme is a [`Value`]) into a result by recursive descent over
+//!   the syntax tree.
+//! - **The "step loop" trick**: instead of writing a recursive
+//!   `fn eval(expr, env) -> Value`, we run a *loop* over a small
+//!   `Step` state machine with an explicit `Vec<Frame>` stack of
+//!   pending work. That shape pays for itself many times over:
+//!     - **Tail-call optimization** (R7RS §3.5) becomes free: a tail
+//!       position transitions `Step::Eval(tail_expr, env)` *without*
+//!       pushing a frame.
+//!     - **First-class continuations** (`call/cc`) become two dozen
+//!       lines: a continuation is a `frames.clone()`, and invoking
+//!       it is `frames = saved`. See [ADR
+//!       0004](../../docs/0004-continuations.md).
+//!     - **Exception handling**, `dynamic-wind`, and parameter
+//!       restoration all use the same `Frame` enum. See [ADR
+//!       0005](../../docs/0005-exception-handling.md).
+//! - **R7RS special forms**: how `quote` / `if` / `lambda` / `define`
+//!   / `set!` / `begin` / the derived forms (`let`, `cond`, `do`, …)
+//!   are dispatched and what each one's evaluation rule actually is.
+//!
+//! ## Read in this order
+//!
+//! 1. The [`Step`] and [`Frame`] enums below — they define the
+//!    state machine. Don't skim. The rest of the file is a catalog
+//!    of how to transition between these states.
+//! 2. The [`eval`] function — five match arms, one per `Step`. The
+//!    whole architecture is visible in those forty lines.
+//! 3. `step_eval` — the syntax dispatcher; one arm per special
+//!    form.
+//! 4. `step_apply` — the procedure dispatcher; one arm per
+//!    [`Procedure`](crate::value::Procedure) variant.
+//! 5. `resume` — the frame dispatcher; one arm per [`Frame`].
+//!
+//! Each `step_*_form` helper handles one special form in isolation
+//! and is short enough to read on its own. The big bodies are
+//! `step_eval` and `resume`; both are dispatch tables.
 //!
 //! ## Tail positions (the discipline this module enforces)
 //!
+//! R7RS §3.5 specifies which expression positions must be in tail
+//! position. The rule we enforce here: a sub-evaluation is in tail
+//! position if and only if no frame is pushed for it.
+//!
 //! - The chosen branch of `if` is in tail position.
-//! - The last expression of `begin` (and of a `lambda` body) is in tail
-//!   position; earlier expressions are not.
-//! - The body expression of a procedure call is in tail position with
-//!   respect to its caller.
+//! - The last expression of `begin` (and of a `lambda` body) is in
+//!   tail position; earlier expressions are not.
+//! - The body expression of a procedure call is in tail position
+//!   with respect to its caller.
 //!
-//! Argument evaluation is *not* in tail position. `(f (g x))` evaluates
-//! `(g x)` under a frame so the value can be collected as an argument
-//! to `f`.
+//! Argument evaluation is *not* in tail position. `(f (g x))`
+//! evaluates `(g x)` under a frame so the value can be collected as
+//! an argument to `f`.
 //!
-//! ## Special forms recognized here (T7)
-//!
-//! `quote`, `if`, `lambda`, `define`, `set!`, `begin`. Derived forms
-//! (`let`, `let*`, `letrec`, `cond`, `case`, `and`, `or`, `when`,
-//! `unless`, `do`, `parameterize`, `quasiquote`-expansion) are added in
-//! T8 (`nscheme-i4h`).
+//! See also: [ADR 0001](../../docs/0001-tree-walking-interpreter.md)
+//! for the long-form architectural rationale.
 
 // Several internal helpers take `Value`/`EnvRef` by value so they can
 // consume and decompose them without forcing the caller to clone. The
@@ -98,6 +128,31 @@ impl EvalError {
 // ---------------------------------------------------------------------
 // Step + Frame state
 // ---------------------------------------------------------------------
+//
+// The evaluator is a state machine. The `Step` enum names the four
+// transitions the machine can make on any given iteration; the
+// `Frame` enum names the *pending work* that's waiting on a
+// sub-evaluation to complete. The eval loop in `eval()` is the
+// dispatch:
+//
+//   loop {
+//       Step::Eval(expr, env)      -> step_eval(...)        (one form -> next Step)
+//       Step::Apply(proc, args)    -> step_apply(...)       (one call -> next Step)
+//       Step::Return(value)        -> resume(top_frame, v)  (next Step from pending work)
+//       Step::InvokeContinuation   -> restore saved frames
+//       Step::Raise(exc, cont?)    -> walk frames for handler
+//   }
+//
+// If `Step::Return` pops an empty frame stack, evaluation is done
+// and the result is returned. Every other transition picks back up
+// inside the loop.
+//
+// The `Frame` enum is bigger because every sub-evaluation needs to
+// remember what to do with its result. There's one variant per
+// flavor of pending work: "the test of an `if` is evaluating",
+// "argument 3 of a call is evaluating", "an exception handler is
+// installed", and so on. Each variant carries an `env` so the
+// resume happens in the right lexical scope.
 
 /// One transition of the evaluator loop.
 enum Step {
@@ -248,17 +303,39 @@ pub enum Frame {
 /// Evaluate one expression in `env`. The expression is a runtime
 /// [`Value`] produced by [`crate::parse::parse_one`] or constructed
 /// programmatically.
+///
+/// This is the entire evaluator in forty lines. Everything else in
+/// the file is a helper that produces or consumes a [`Step`].
 pub fn eval(expr: Value, env: EnvRef) -> Result<Value, EvalError> {
+    // Two pieces of state: the next transition to make, and the
+    // continuation stack. `frames` IS the call stack — a call/cc
+    // can snapshot it (`frames.clone()`) and a continuation
+    // invocation can replace it (`frames = saved`).
     let mut state = Step::Eval(expr, env);
     let mut frames: Vec<Frame> = Vec::new();
     loop {
         state = match state {
+            // Evaluate the expression. Returns the next Step —
+            // possibly `Eval` again (we recursed into a sub-expr),
+            // `Apply` (the expression was a call), `Return` (the
+            // expression was self-evaluating), or `Raise`.
             Step::Eval(expr, env) => step_eval(expr, env, &mut frames)?,
+            // Apply a procedure to args. Returns the next Step the
+            // procedure produced.
             Step::Apply(proc, args) => step_apply(proc, args, &mut frames)?,
+            // A sub-evaluation finished. Pop the top frame to
+            // decide what's next. If there isn't one, the whole
+            // evaluation is done and `value` is the result.
             Step::Return(value) => match frames.pop() {
                 Some(frame) => resume(frame, value, &mut frames)?,
                 None => return Ok(value),
             },
+            // A captured continuation is being invoked. Per ADR
+            // 0004, that's a frame-stack replacement — but it's
+            // not quite a one-liner because `dynamic-wind`
+            // demands we fire `before`/`after` thunks on the way
+            // out of the current extents and into the target
+            // extents.
             Step::InvokeContinuation(saved, value) => {
                 // R7RS §6.10: before/after thunks of any
                 // dynamic-wind extents that we leave/enter must
@@ -288,6 +365,11 @@ pub fn eval(expr: Value, env: EnvRef) -> Result<Value, EvalError> {
                     Step::Return(Value::Unspecified)
                 }
             }
+            // An exception is propagating. See ADR 0005 for the
+            // architecture. The short version: walk back through
+            // the frame stack until we find a handler (installed
+            // by `with-exception-handler` / `guard`), unwind the
+            // frames we passed, and apply the handler.
             Step::Raise(value, continuable) => {
                 // Walk the frame stack looking for an ExceptionHandler.
                 // For raise-continuable we preserve the frames between
@@ -354,6 +436,20 @@ pub fn eval_source(source: &str, env: EnvRef) -> Result<Value, EvalError> {
 // ---------------------------------------------------------------------
 // step_eval
 // ---------------------------------------------------------------------
+//
+// The syntax dispatcher. Given a [`Value`] that represents one
+// Scheme expression, decide what to do next. Self-evaluating atoms
+// return immediately; symbol references look up the env; pair-headed
+// forms dispatch on the head identifier — first checking whether
+// the head is a [`Value::SyntaxRef`] (a macro-introduced
+// identifier — see `macros.rs`), then checking the special-form
+// table, then trying the env for a procedure or macro.
+//
+// Reading note: this is one of the three big match tables in the
+// file (the others are `step_apply` for procedure dispatch and
+// `resume` for frame dispatch). Each arm in the special-form match
+// hands off to a `step_X_form` helper. The helpers are in the
+// Special forms / Derived forms sections below.
 
 fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
     // Self-evaluating values.
@@ -1539,6 +1635,12 @@ fn eval_feature_req(req: &Value) -> Result<bool, EvalError> {
 // ---------------------------------------------------------------------
 // Special forms
 // ---------------------------------------------------------------------
+//
+// The fundamental syntactic forms of R7RS (§4.1). These can't be
+// expressed as macros over a smaller core; each has a custom
+// evaluation rule. Compare the derived-forms section below, where
+// the more elaborate forms (`let`, `cond`, `case`, …) desugar to
+// these.
 
 fn step_quote(tail: &Value) -> Result<Step, EvalError> {
     let mut iter = ListIter::new(tail.clone());
@@ -1717,6 +1819,23 @@ fn eval_sequence(exprs: Vec<Value>, env: EnvRef, frames: &mut Vec<Frame>) -> Ste
 // ---------------------------------------------------------------------
 // Derived forms (T8)
 // ---------------------------------------------------------------------
+//
+// R7RS §4.2: forms that can be described as macros over the
+// fundamental forms above. The R7RS report includes the
+// canonical desugaring for each; we implement them directly here
+// rather than going through `syntax-rules` because the
+// implementations are short and the direct form gives the reader
+// clearer error messages. The structure is:
+//
+//   step_let       -> desugars to a lambda-application
+//   step_let_star  -> nested lets
+//   step_letrec    -> let with mutual recursion
+//   step_cond      -> if-chain
+//   step_case      -> case-by-key dispatch
+//   step_when /
+//   step_unless    -> if + begin
+//   step_and / or  -> short-circuit chain
+//   step_do        -> the looping form
 
 /// `(let ((v e) ...) body...)` desugars to `((lambda (v ...) body...) e ...)`.
 /// `(let name ((v e) ...) body...)` is named let: desugars to
@@ -2351,6 +2470,23 @@ fn step_call(
 // ---------------------------------------------------------------------
 // step_apply
 // ---------------------------------------------------------------------
+//
+// The procedure dispatcher. Given a [`Value::Procedure`] and a fully
+// evaluated argument list, decide what to do next. Each variant of
+// [`crate::value::Procedure`] has its own apply rule:
+//
+//   Primitive          -> call the Rust function pointer
+//   Closure            -> bind args to params, evaluate body
+//   Continuation       -> invoke the saved frame stack
+//   Parameter          -> get/set the cell
+//   CaseLambda         -> pick the matching arity clause
+//   RecordConstructor/ -> R7RS §5.5 record-type machinery
+//   RecordPredicate/
+//   RecordAccessor/
+//   RecordMutator
+//   DynamicWindStart   -> internal driver for `dynamic-wind`
+//
+// This is the second of the three big dispatch tables in this file.
 
 fn step_apply(
     proc_value: Value,
@@ -2595,6 +2731,15 @@ fn step_apply(
 // ---------------------------------------------------------------------
 // resume
 // ---------------------------------------------------------------------
+//
+// The frame dispatcher. When a sub-evaluation produces a value
+// (`Step::Return(v)`), the eval loop pops the top frame and calls
+// this function with `(frame, v)`. Each [`Frame`] variant has its
+// own resume rule that decides what the next [`Step`] should be.
+//
+// This is the third of the three big dispatch tables in this file.
+// Together with `step_eval` (syntax dispatch) and `step_apply`
+// (procedure dispatch), it forms the complete state machine.
 
 fn resume(frame: Frame, value: Value, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
     match frame {

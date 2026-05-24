@@ -1,18 +1,35 @@
-//! Parser that converts a [`Token`] stream into runtime [`Value`]s.
+//! Parser that converts a [`Token`] stream into runtime
+//! [`Value`](crate::value::Value)s.
 //!
-//! Scheme programs *are* data: the parser does not produce a separate AST
-//! type, it produces the same [`Value`] enum the interpreter manipulates
-//! at runtime. The evaluator then walks that value.
+//! ## What you'll learn here
 //!
-//! The grammar implemented here is R7RS-small §7.1.2 (external
-//! representations), restricted to what nscheme v1 supports:
+//! - **Scheme**: the most important property of S-expression
+//!   syntax — *code is data*. The parser does not produce a
+//!   separate AST type; it produces the same `Value` enum that the
+//!   interpreter manipulates at runtime. `(define x 5)` parses to
+//!   a list whose first element is the symbol `define`, second is
+//!   the symbol `x`, third is the integer `5`. The evaluator then
+//!   walks that list. This is what makes macros possible (a macro
+//!   is just a procedure that transforms one list of values into
+//!   another) and what makes `(eval form)` a one-liner.
+//! - **Cyclic structure in the reader**: R7RS datum labels (`#0=`,
+//!   `#0#`) let a literal refer back to itself. We resolve this
+//!   with a placeholder cons-cell approach: when we see `#0=`, we
+//!   allocate an empty pair and register it under label 0; when we
+//!   later see `#0#`, we return that same pair (sharing the `Rc`);
+//!   when the labeled datum finishes parsing, we mutate the
+//!   placeholder in place to contain the parsed contents. Cycles
+//!   are real.
+//! - **Reader hygiene**: `#!fold-case` flips identifier case
+//!   sensitivity on for the rest of the input (R7RS §2.1). The
+//!   parser carries that bit as state.
 //!
-//! - Atoms: booleans, characters, strings, numbers (`Int` and `Float` only
-//!   in v1; bignums and rationals come in `nscheme-c92`), symbols.
-//! - Lists, proper and improper (`(a b . c)`).
-//! - Vectors and bytevectors.
-//! - Reader macros (`'`, `` ` ``, `,`, `,@`) expand to two-element lists.
-//! - Datum comments (`#;`) skip exactly one following datum.
+//! ## Read alongside
+//!
+//! - [`crate::lex`] — produces our input.
+//! - [`crate::value`] — defines what our output values are.
+//! - [`crate::eval`] — consumes our output values.
+//! - R7RS §7.1.2 (external representations), §2.4 (datum labels).
 
 use std::collections::{HashMap, VecDeque};
 

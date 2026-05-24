@@ -1,9 +1,23 @@
 //! nscheme command-line frontend.
 //!
-//! Usage:
+//! This is the only binary in the project; everything else is a
+//! library (see [`lib.rs`](../lib.rs)). The frontend is deliberately
+//! thin: parse the arguments, install the base library into a fresh
+//! [`Env`], and then either drive the REPL or evaluate the source
+//! the user provided. No language logic lives here.
+//!
+//! ## Usage
+//!
 //!   nscheme            — start the interactive REPL
 //!   nscheme FILE       — evaluate FILE and exit (no REPL)
 //!   nscheme -e EXPR    — evaluate EXPR and print the result, then exit
+//!
+//! ## Read alongside
+//!
+//! - [`crate::lib`] — module map of the library.
+//! - The REPL loop in [`run_repl`] uses [`rustyline`] for the line
+//!   editor (history, multi-line prompts when parens aren't
+//!   balanced).
 
 use std::path::Path;
 use std::process::ExitCode;

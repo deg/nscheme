@@ -1,19 +1,61 @@
-//! R7RS-small base-library primitives.
+//! The `(scheme base)` library — primitive procedures.
 //!
-//! This module installs a curated subset of the procedures from the
-//! `(scheme base)` library — enough for the REPL (`nscheme-qkh`) to
-//! support real programs. Bigger or specialized libraries land in their
-//! own beads:
+//! This file is the long catalog of every primitive (`+`, `car`,
+//! `string-length`, `error-object?`, …) that the REPL needs.
 //!
-//! - Numeric tower (bignum / rational / full type ladder) — T12
-//!   (`nscheme-c92`).
-//! - String / char / vector / bytevector ops beyond the minimum — T13
-//!   (`nscheme-d7c`).
-//! - I/O and ports — T14 (`nscheme-wcy`).
+//! ## What you'll learn here
 //!
-//! Entry point: [`install_base`] adds the primitives and a small
-//! bootstrap of higher-order procedures (`map`, `for-each`) defined in
-//! Scheme on top of the primitives.
+//! - **Scheme**: which procedures the base library provides. R7RS
+//!   §6 walks them; this file is the working implementation.
+//! - **The numeric tower in code**: the [`Num`] enum holds the four
+//!   exact rungs (`Int`, `Big`, `Rat`, `Float`) plus inexact
+//!   `Complex`. `num_add` / `num_sub` / `num_mul` / `num_div` show
+//!   the R7RS contagion rules (any inexact operand → inexact
+//!   result; otherwise stay in the lowest-needed exact rung). See
+//!   `docs/0002-numeric-tower.md` for the rationale.
+//! - **Rust pattern (a fourth time)**: how a primitive's
+//!   implementation lives behind a `fn` pointer with the signature
+//!   [`PrimitiveFn`](crate::value::PrimitiveFn). This is what makes
+//!   `Procedure::Primitive` cheap: no heap allocation, no dyn
+//!   dispatch.
+//!
+//! ## Reading note
+//!
+//! The file is long because the catalog is long. The shape is
+//! uniform: [`install_base`] calls a series of `install_*`
+//! sub-functions, each of which is a flat table of
+//! `define(env, "name", arity, |args| { … })` calls. Skim or
+//! search for the procedure you care about; you don't read this
+//! file front-to-back the way you do `value.rs` or `eval.rs`.
+//!
+//! The order of installation:
+//!
+//!   `install_arithmetic`   — `+`, `-`, `*`, `/`, `<`, `<=`, …
+//!   `install_comparison`   — `eq?`, `eqv?`, `equal?`, `>`, `<`, …
+//!   `install_predicates`   — `null?`, `pair?`, `number?`, …
+//!   `install_equality`     — the equality procedures
+//!   `install_list_ops`     — `car`, `cdr`, `cons`, `list`, …
+//!   `install_misc`         — `error`, `exit`, the assorted rest
+//!   `install_chars`        — character predicates and conversions
+//!   `install_strings`      — string ops
+//!   `install_symbols`      — `symbol->string`, `string->symbol`
+//!   `install_vectors`      — vector ops
+//!   `install_bytevectors`  — bytevector ops
+//!   `install_inexact`      — `sqrt`, `sin`, `log`, …
+//!   `install_io`           — port I/O (in [`crate::io`])
+//!
+//! After the install phase, [`BOOTSTRAP`] near the bottom of the
+//! file is loaded — that's the Scheme source that defines
+//! higher-order procedures (`map`, `for-each`, `member`, …) on top
+//! of the primitives.
+//!
+//! ## Read alongside
+//!
+//! - [`crate::value`] — the `Value` enum these primitives operate
+//!   on and the `Procedure::Primitive` variant they install into.
+//! - [`crate::eval::step_apply`] — the dispatcher that calls these
+//!   primitives at runtime.
+//! - R7RS §6.
 
 // install_* functions are intentionally long — each is a flat
 // registration table for a category of primitives. Splitting them

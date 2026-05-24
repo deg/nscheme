@@ -1,25 +1,49 @@
 //! Runtime value types for nscheme.
 //!
-//! This module defines the [`Value`] enum, which represents every kind of
-//! Scheme object the interpreter can hold at runtime, along with the
-//! supporting types ([`Symbol`], [`Pair`], [`Procedure`], [`Port`]) and
-//! the three R7RS equality predicates (`eq?`, `eqv?`, `equal?`).
+//! This is the central data-definition file of the interpreter: it says
+//! what a runtime Scheme value *is*. Almost every other module either
+//! produces these values (the lexer / parser), consumes them (the
+//! evaluator and primitives), or both.
 //!
-//! ## Cycle handling
+//! ## What you'll learn here
+//!
+//! - **Scheme**: what kinds of values R7RS distinguishes — null, the
+//!   unspecified value, booleans, characters, symbols, the four-rung
+//!   numeric tower (fixnum / bignum / rational / float) plus complex,
+//!   pairs, vectors, bytevectors, strings, ports, procedures, records,
+//!   promises, multiple-value packets, error objects.
+//! - **The three equality predicates** (`eq?`, `eqv?`, `equal?`) and
+//!   why each gives a different answer for "the same" inputs.
+//! - **Symbol interning** and why R7RS demands it (so that `eq?` on
+//!   symbols is just a pointer comparison).
+//! - **Rust**: the `Rc<RefCell<T>>` pattern for shared mutable state,
+//!   which is how Scheme's `set-car!`-style mutation lives inside
+//!   Rust's ownership model.
+//! - **`thiserror`** for ergonomic error enums.
+//! - The discipline a closed enum gives you: every new kind of value
+//!   has to be added here, and `rustc`'s exhaustiveness checker then
+//!   makes you handle it at every match site in the codebase.
+//!
+//! ## Read alongside
+//!
+//! - `docs/0002-numeric-tower.md` — why the four-rung numeric tower.
+//! - `docs/0004-continuations.md` — why [`Procedure::Continuation`] is
+//!   a captured frame stack.
+//! - `docs/0005-exception-handling.md` — how [`ErrorObject`] flows
+//!   through `with-exception-handler` / `guard`.
+//! - R7RS §6.1 (equivalence predicates), §6.4 (pairs and lists), §6.2
+//!   (numbers).
+//!
+//! ## A note on cycles and garbage collection
 //!
 //! Mutable compound values (pairs, vectors, strings, bytevectors, ports)
 //! are wrapped in `Rc<RefCell<…>>`. This is the simplest representation
 //! that supports `set-car!` / `set-cdr!` / `vector-set!` / `string-set!`,
 //! but it does **not** reclaim cyclic structures — a circular list will
-//! leak until process exit. This is documented as a known v1 limitation;
-//! a proper garbage collector is out of scope for the epic.
-//!
-//! ## Procedures
-//!
-//! The [`Procedure`] enum currently has only the [`Procedure::Primitive`]
-//! variant — closures are added when the evaluator lands (see bead
-//! `nscheme-1no`). Extending the enum is backwards-compatible for
-//! internal callers.
+//! leak until process exit. A proper garbage collector is documented as
+//! a v1 limitation (bead `nscheme-3gv`). The `equal?` and `write` paths
+//! cope with cycles by tracking visited `Rc` pointers in a set; see
+//! `equal_inner` and `count_refs` below.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -36,6 +60,22 @@ use crate::env::EnvRef;
 // ---------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------
+//
+// Rust note (`thiserror`): each variant carries an `#[error("…")]`
+// attribute that the `thiserror` macro turns into a `Display` impl.
+// Variants with placeholders like `{0}` or `{expected}` reference the
+// payload by field name or tuple index. This gives us human-readable
+// error formatting without a hand-written `match` in `Display`, while
+// `#[derive(Error)]` itself only adds the `std::error::Error` trait
+// (which `?` propagation needs).
+//
+// Scheme note: most R7RS implementations conflate "raised by Scheme
+// code with `(raise …)`" and "the host language hit a problem" into
+// the same `ErrorObject` type. We keep them as two separate Rust
+// types — `RuntimeError` (this enum, host-side) and `ErrorObject`
+// (Scheme-side, defined below) — and have a small bridge function
+// in eval.rs (`runtime_error_to_value`) that converts the host
+// kind into the Scheme kind. See ADR 0005.
 
 /// Runtime errors raised by primitives, the evaluator, and helpers.
 /// Variants will grow as later beads need finer-grained reporting.
@@ -81,6 +121,27 @@ pub type Result<T> = std::result::Result<T, RuntimeError>;
 // ---------------------------------------------------------------------
 // Symbol interning
 // ---------------------------------------------------------------------
+//
+// Scheme note: in Scheme, `(eq? 'foo 'foo)` must be `#t`. The two
+// occurrences of `foo` were written separately by the programmer but
+// they refer to the same *identifier*. This is the defining property
+// of a symbol versus a string: symbols are compared by identity, not
+// content. The traditional implementation technique — used here — is
+// *interning*: the first time anyone asks for the symbol `foo`, we
+// allocate one piece of storage holding the name; every subsequent
+// request for `foo` returns a handle to that same storage.
+//
+// Rust note: the interning table lives in a `thread_local!` because
+// `Rc<str>` (and `Symbol` itself) is not thread-safe. `nscheme` is a
+// single-threaded interpreter; if we ever made it multi-threaded we
+// would switch to `Arc<str>` and a `OnceLock<Mutex<HashMap<…>>>`.
+//
+// We store `Rc<str>` rather than `Rc<String>` because `str` is the
+// unsized string slice — exactly what we want for read-only names.
+// An `Rc<str>` is two machine words (data pointer + length) and never
+// re-allocates; an `Rc<String>` would be one machine word but every
+// access goes through a level of indirection and the `String`'s
+// capacity field is wasted.
 
 thread_local! {
     static SYMBOLS: RefCell<HashMap<String, Rc<str>>> = RefCell::new(HashMap::new());
@@ -145,6 +206,32 @@ impl fmt::Display for Symbol {
 // ---------------------------------------------------------------------
 // Pair
 // ---------------------------------------------------------------------
+//
+// Scheme note: a *pair* (also called a *cons cell*) is the
+// two-element building block of Scheme's lists. `(car p)` returns
+// the first element, `(cdr p)` returns the rest. A proper list `(a
+// b c)` is shorthand for `(cons a (cons b (cons c '())))` — a chain
+// of pairs ending in the empty list.
+//
+// Rust note (the `Rc<RefCell<T>>` pattern, appearing for the first
+// time below): R7RS pairs are *mutable* — `(set-car! p v)` replaces
+// the first slot. But the same pair can be referenced from many
+// places (lists are shared all the time in Scheme), so it can't live
+// behind a unique mutable reference. We need:
+//
+//   - shared ownership: many `Value`s can refer to the same pair
+//     and the storage stays alive until all of them go away. That's
+//     `Rc<T>` (reference-counted).
+//   - mutability through a shared reference: `&Rc<T>` only gives
+//     immutable access. To get mutation we wrap the inner type in
+//     `RefCell<T>`, which moves the borrow check from compile time
+//     to runtime — `.borrow_mut()` panics if anyone else is holding
+//     a `.borrow()` simultaneously.
+//
+// `Rc<RefCell<Pair>>` is what those two together look like:
+// "shareable, reassignable cell." You'll see this pattern repeated
+// for `String`, `Vector`, `Bytevector`, and `Port` — every Scheme
+// value that is both shareable and mutable.
 
 /// A cons cell. Mutable for `set-car!` / `set-cdr!`.
 #[derive(Debug)]
@@ -155,6 +242,15 @@ pub struct Pair {
 
 /// Components of a Cartesian complex number. Each field carries
 /// its own exactness as the underlying `Value` form.
+///
+/// Scheme note: R7RS allows a complex value's real and imaginary
+/// parts to have *independent* exactness. `1+2i` is exact-complex
+/// (both parts are exact integers); `1.0+2i` is mixed (inexact real,
+/// exact imaginary); `1.0+2.0i` is fully inexact. Each form should
+/// round-trip through `(string->number (number->string z))`. We
+/// preserve that distinction by storing each component as a full
+/// `Value` and letting the writer inspect their variants when
+/// rendering the lexeme.
 #[derive(Debug, Clone)]
 pub struct ComplexValue {
     pub re: Value,
@@ -191,6 +287,16 @@ impl ComplexValue {
 // ---------------------------------------------------------------------
 // Procedure
 // ---------------------------------------------------------------------
+//
+// This is the closed set of all *callable* things in nscheme. The
+// evaluator's `step_apply` function dispatches on this enum: each
+// variant has its own apply rule. The variants are not all
+// user-visible — some (e.g. `DynamicWindStart`) are internal control
+// procedures used by the evaluator to implement R7RS semantics.
+//
+// Reading note: skip ahead to `Value::Procedure` and `step_apply` in
+// `eval.rs` if you want to see how a call site dispatches on this
+// enum.
 
 /// Signature of a Rust-implemented primitive.
 pub type PrimitiveFn = fn(&[Value]) -> Result<Value>;
@@ -464,6 +570,30 @@ impl Port {
 // ---------------------------------------------------------------------
 // Value
 // ---------------------------------------------------------------------
+//
+// The central enum of the interpreter. Every runtime Scheme value is
+// one of these variants. Three things to notice:
+//
+// 1. **Atoms vs. heap values**: Atoms (`Null`, `Unspecified`, `Eof`,
+//    `Bool`, `Char`, `Symbol`, `Int`, `Float`) are copied by value
+//    when the `Value` is cloned. Heap values (`Pair`, `Vector`,
+//    `String`, `Procedure`, `Port`, …) live behind an `Rc`, so
+//    cloning a `Value` just bumps a refcount.
+//
+// 2. **The closed-enum discipline**: Adding a new kind of Scheme
+//    value means adding a variant here. `rustc` will then refuse to
+//    compile every `match` site that hasn't handled it. This is
+//    deliberate — it's the easiest way to keep the interpreter
+//    correct as the language grows. Whenever you add a variant,
+//    expect to update: `is_number` / `is_string` / etc, `type_name`,
+//    the `eq` / `eqv` / `equal` machinery, the `write_value_body`
+//    dispatch, and any primitive that needs to know about the new
+//    kind.
+//
+// 3. **Why `Clone` is cheap**: every heap-allocated payload is
+//    behind `Rc`, so `Value::clone()` is a small handful of
+//    refcount bumps in the worst case. The evaluator clones values
+//    liberally; this is what makes that affordable.
 
 /// Every runtime Scheme value.
 #[derive(Clone)]
@@ -770,6 +900,29 @@ impl Value {
 // ---------------------------------------------------------------------
 // Equality
 // ---------------------------------------------------------------------
+//
+// Scheme has three equality predicates of increasing "depth":
+//
+//   `eq?`     — identity. Cheap. Two heap-allocated values are
+//               `eq?` only if they share an `Rc` pointer; atoms
+//               compare by value. Two distinct allocations of
+//               the same string are NOT `eq?`.
+//
+//   `eqv?`    — like `eq?`, plus a special rule for numbers:
+//               `(eqv? 1 1.0)` is `#f` (different exactness),
+//               but `(eqv? 1 1)` and `(eqv? 1.0 1.0)` are `#t`.
+//               NaN is `eqv?` to itself (a bit-for-bit compare).
+//
+//   `equal?`  — structural recursion. Two pairs are `equal?` if
+//               their cars and cdrs are `equal?`. Two strings are
+//               `equal?` if their character contents match. R7RS
+//               requires `equal?` to terminate on cyclic input,
+//               which we handle with a visited set keyed on
+//               `Rc` pointers.
+//
+// The three predicates are layered: `eqv?` falls back to `eq?` for
+// non-numeric cases, and `equal?` falls back to `eqv?` for atoms.
+// See R7RS §6.1.
 
 /// R7RS `eq?` (§6.1). Identity equality. For atoms, equality is by
 /// value (booleans, the empty list, characters, symbols, fixnums).
@@ -894,6 +1047,30 @@ fn equal_inner(
 // ---------------------------------------------------------------------
 // Display / Debug
 // ---------------------------------------------------------------------
+//
+// Scheme has two ways of rendering a value to text. `write` produces
+// output that the reader can parse back: strings get quotes and
+// escape sequences, characters use `#\`, and so on. `display` is the
+// human-friendly variant: strings appear without quotes, characters
+// appear as themselves. R7RS §6.13.3 covers both.
+//
+// We map `write` onto Rust's `Debug` and `display` onto `Display`.
+// That lets `format!("{x:?}")` produce write semantics and
+// `format!("{x}")` produce display semantics, which is convenient
+// inside the interpreter (every primitive's error message just
+// embeds `{value}` and gets the right thing for free).
+//
+// The shared-structure machinery (`count_refs`, `LabelState`,
+// `write_value`) implements R7RS *datum labels* (`#0=`, `#0#`).
+// Without them a cyclic list would loop forever in `write`. The
+// algorithm is a two-pass count-then-emit:
+//   1. Walk the value, counting how often each `Rc`-shared node is
+//      reached. Note which ones are reached *while we're already in
+//      the middle of visiting them* — those are the cyclic nodes.
+//   2. Emit. The first time we hit a cyclic node, emit `#N=` and
+//      assign label N. Subsequent visits emit `#N#`.
+// `write-shared` extends the labeling to merely-shared (non-cyclic)
+// substructure too; plain `write` only labels cycles.
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

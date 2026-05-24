@@ -2,7 +2,9 @@
 
 An [R7RS-small](https://small.r7rs.org/) Scheme interpreter written in Rust. Built primarily as an experiment in autonomous AI-assisted development; not (yet) a production-grade implementation.
 
-See [PROJECT.md](PROJECT.md) for a retrospective on the build process — what worked, what didn't, and lessons for similar AI-assisted implementation projects.
+- **Reading the code?** Start with [TOUR.md](TOUR.md) — a guided tour of the source with suggested reading orders.
+- **Curious how it was built?** [PROJECT.md](PROJECT.md) is the retrospective on the AI-assisted build process.
+- **Contributing or extending it?** [docs/STYLE.md](docs/STYLE.md) describes the in-code commentary conventions; [docs/](docs/) holds the architecture decision records.
 
 ## What this is
 
