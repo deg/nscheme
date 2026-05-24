@@ -116,9 +116,8 @@ pub fn install_io(env: &EnvRef) {
         |a| match &a[0] {
             Value::Bytevector(b) => {
                 let bytes = b.borrow().clone();
-                let s = String::from_utf8(bytes).unwrap_or_else(|e| {
-                    e.into_bytes().iter().map(|&b| b as char).collect()
-                });
+                let s = String::from_utf8(bytes)
+                    .unwrap_or_else(|e| e.into_bytes().iter().map(|&b| b as char).collect());
                 Ok(Value::Port(Rc::new(RefCell::new(Port::BinaryInput {
                     content: s,
                     pos: 0,
@@ -482,8 +481,8 @@ pub fn install_io(env: &EnvRef) {
             }
             match &mut *port {
                 Port::StringInput { content, pos }
-                    | Port::BinaryInput { content, pos }
-                    | Port::FileInput { content, pos, .. } => {
+                | Port::BinaryInput { content, pos }
+                | Port::FileInput { content, pos, .. } => {
                     let bytes = content.as_bytes();
                     if *pos >= bytes.len() {
                         return Ok(Value::Eof);
@@ -608,8 +607,8 @@ fn write_to_port(port: Option<&Value>, s: &str) -> Result<Value, RuntimeError> {
 fn read_datum_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
     match port {
         Port::StringInput { content, pos }
-                    | Port::BinaryInput { content, pos }
-                    | Port::FileInput { content, pos, .. } => {
+        | Port::BinaryInput { content, pos }
+        | Port::FileInput { content, pos, .. } => {
             let rest = &content[*pos..];
             let (datum, consumed) = crate::parse::parse_one_with_consumed(rest)
                 .map_err(|e| RuntimeError::ReadError(format!("read: {e}")))?;
@@ -629,8 +628,8 @@ fn read_datum_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
 fn read_char_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
     match port {
         Port::StringInput { content, pos }
-                    | Port::BinaryInput { content, pos }
-                    | Port::FileInput { content, pos, .. } => {
+        | Port::BinaryInput { content, pos }
+        | Port::FileInput { content, pos, .. } => {
             if let Some(c) = content[*pos..].chars().next() {
                 *pos += c.len_utf8();
                 Ok(Value::Char(c))
@@ -663,9 +662,8 @@ fn read_char_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
 fn peek_char_from_port(port: &Port) -> Result<Value, RuntimeError> {
     match port {
         Port::StringInput { content, pos }
-                    | Port::BinaryInput { content, pos }
-                    | Port::FileInput { content, pos, .. } => Ok(content
-            [*pos..]
+        | Port::BinaryInput { content, pos }
+        | Port::FileInput { content, pos, .. } => Ok(content[*pos..]
             .chars()
             .next()
             .map_or(Value::Eof, Value::Char)),
@@ -682,8 +680,8 @@ fn peek_char_from_port(port: &Port) -> Result<Value, RuntimeError> {
 fn read_line_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
     match port {
         Port::StringInput { content, pos }
-                    | Port::BinaryInput { content, pos }
-                    | Port::FileInput { content, pos, .. } => {
+        | Port::BinaryInput { content, pos }
+        | Port::FileInput { content, pos, .. } => {
             if *pos >= content.len() {
                 return Ok(Value::Eof);
             }

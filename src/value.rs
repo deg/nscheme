@@ -784,8 +784,10 @@ pub fn eq(a: &Value, b: &Value) -> bool {
         // R7RS `eq?` on identifiers compares by name; whether the
         // symbol carries hygienic env metadata or not doesn't
         // change identity for user-visible equality.
-        (Value::Symbol(x) | Value::SyntaxRef { name: x, .. },
-         Value::Symbol(y) | Value::SyntaxRef { name: y, .. }) => x == y,
+        (
+            Value::Symbol(x) | Value::SyntaxRef { name: x, .. },
+            Value::Symbol(y) | Value::SyntaxRef { name: y, .. },
+        ) => x == y,
         // R7RS §6.1: eq? on numbers is implementation-defined. We use
         // value equality on unboxed numbers (Int / Float) and pointer
         // equality on heap-allocated numbers (BigInt / Rational).
@@ -1191,7 +1193,10 @@ fn looks_numeric(s: &str) -> bool {
     // OR `+inf.0` / `-inf.0` / `+nan.0` / `-nan.0` (any case);
     // OR `+i` / `-i` (the complex unit imaginary).
     let lower = s.to_ascii_lowercase();
-    if matches!(lower.as_str(), "+inf.0" | "-inf.0" | "+nan.0" | "-nan.0" | "+i" | "-i") {
+    if matches!(
+        lower.as_str(),
+        "+inf.0" | "-inf.0" | "+nan.0" | "-nan.0" | "+i" | "-i"
+    ) {
         return true;
     }
     let bytes = s.as_bytes();
@@ -1345,7 +1350,8 @@ fn write_complex(c: &ComplexValue, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     // The sign of the imaginary part may be carried by its writer
     // (special values like `+inf.0` / `+nan.0` always emit one) or
     // we may need to prepend it ourselves. Compute it once.
-    let im_emits_own_sign = matches!(&c.im, Value::Float(x) if !x.is_finite() || x.is_sign_negative());
+    let im_emits_own_sign =
+        matches!(&c.im, Value::Float(x) if !x.is_finite() || x.is_sign_negative());
     if !re_is_zero {
         write_complex_part(&c.re, f)?;
     }

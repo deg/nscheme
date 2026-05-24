@@ -261,74 +261,74 @@ fn format_int_radix(b: &BigInt, radix: u32) -> String {
 /// don't pull in a Unicode-tables crate just for this.
 fn unicode_digit_value(c: char) -> Option<u32> {
     const DIGIT_ZEROS: &[u32] = &[
-        0x0030, // ASCII
-        0x0660, // Arabic-Indic
-        0x06F0, // Extended Arabic-Indic
-        0x07C0, // NKo
-        0x0966, // Devanagari
-        0x09E6, // Bengali
-        0x0A66, // Gurmukhi
-        0x0AE6, // Gujarati
-        0x0B66, // Oriya
-        0x0BE6, // Tamil
-        0x0C66, // Telugu
-        0x0CE6, // Kannada
-        0x0D66, // Malayalam
-        0x0DE6, // Sinhala Lith
-        0x0E50, // Thai
-        0x0ED0, // Lao
-        0x0F20, // Tibetan
-        0x1040, // Myanmar
-        0x1090, // Myanmar Shan
-        0x17E0, // Khmer
-        0x1810, // Mongolian
-        0x1946, // Limbu
-        0x19D0, // New Tai Lue
-        0x1A80, // Tai Tham Hora
-        0x1A90, // Tai Tham Tham
-        0x1B50, // Balinese
-        0x1BB0, // Sundanese
-        0x1C40, // Lepcha
-        0x1C50, // Ol Chiki
-        0xA620, // Vai
-        0xA8D0, // Saurashtra
-        0xA900, // Kayah Li
-        0xA9D0, // Javanese
-        0xA9F0, // Myanmar Tai Laing
-        0xAA50, // Cham
-        0xABF0, // Meetei Mayek
-        0xFF10, // Fullwidth
-        0x104A0,  // Osmanya
-        0x10D30,  // Hanifi Rohingya
-        0x11066,  // Brahmi
-        0x110F0,  // Sora Sompeng
-        0x11136,  // Chakma
-        0x111D0,  // Sharada
-        0x112F0,  // Khudawadi
-        0x11450,  // Newa
-        0x114D0,  // Tirhuta
-        0x11650,  // Modi
-        0x116C0,  // Takri
-        0x11730,  // Ahom
-        0x118E0,  // Warang Citi
-        0x11950,  // Dives Akuru
-        0x11C50,  // Bhaiksuki
-        0x11D50,  // Masaram Gondi
-        0x11DA0,  // Gunjala Gondi
-        0x11F50,  // Kawi
-        0x16A60,  // Mro
-        0x16AC0,  // Tangsa
-        0x16B50,  // Pahawh Hmong
-        0x1D7CE,  // Mathematical Bold
-        0x1D7D8,  // Mathematical Double-Struck
-        0x1D7E2,  // Mathematical Sans-Serif
-        0x1D7EC,  // Mathematical Sans-Serif Bold
-        0x1D7F6,  // Mathematical Monospace
-        0x1E140,  // Nyiakeng Puachue Hmong
-        0x1E2F0,  // Wancho
-        0x1E4F0,  // Nag Mundari
-        0x1E950,  // Adlam
-        0x1FBF0,  // Segmented (Mathematical) Digits
+        0x0030,  // ASCII
+        0x0660,  // Arabic-Indic
+        0x06F0,  // Extended Arabic-Indic
+        0x07C0,  // NKo
+        0x0966,  // Devanagari
+        0x09E6,  // Bengali
+        0x0A66,  // Gurmukhi
+        0x0AE6,  // Gujarati
+        0x0B66,  // Oriya
+        0x0BE6,  // Tamil
+        0x0C66,  // Telugu
+        0x0CE6,  // Kannada
+        0x0D66,  // Malayalam
+        0x0DE6,  // Sinhala Lith
+        0x0E50,  // Thai
+        0x0ED0,  // Lao
+        0x0F20,  // Tibetan
+        0x1040,  // Myanmar
+        0x1090,  // Myanmar Shan
+        0x17E0,  // Khmer
+        0x1810,  // Mongolian
+        0x1946,  // Limbu
+        0x19D0,  // New Tai Lue
+        0x1A80,  // Tai Tham Hora
+        0x1A90,  // Tai Tham Tham
+        0x1B50,  // Balinese
+        0x1BB0,  // Sundanese
+        0x1C40,  // Lepcha
+        0x1C50,  // Ol Chiki
+        0xA620,  // Vai
+        0xA8D0,  // Saurashtra
+        0xA900,  // Kayah Li
+        0xA9D0,  // Javanese
+        0xA9F0,  // Myanmar Tai Laing
+        0xAA50,  // Cham
+        0xABF0,  // Meetei Mayek
+        0xFF10,  // Fullwidth
+        0x104A0, // Osmanya
+        0x10D30, // Hanifi Rohingya
+        0x11066, // Brahmi
+        0x110F0, // Sora Sompeng
+        0x11136, // Chakma
+        0x111D0, // Sharada
+        0x112F0, // Khudawadi
+        0x11450, // Newa
+        0x114D0, // Tirhuta
+        0x11650, // Modi
+        0x116C0, // Takri
+        0x11730, // Ahom
+        0x118E0, // Warang Citi
+        0x11950, // Dives Akuru
+        0x11C50, // Bhaiksuki
+        0x11D50, // Masaram Gondi
+        0x11DA0, // Gunjala Gondi
+        0x11F50, // Kawi
+        0x16A60, // Mro
+        0x16AC0, // Tangsa
+        0x16B50, // Pahawh Hmong
+        0x1D7CE, // Mathematical Bold
+        0x1D7D8, // Mathematical Double-Struck
+        0x1D7E2, // Mathematical Sans-Serif
+        0x1D7EC, // Mathematical Sans-Serif Bold
+        0x1D7F6, // Mathematical Monospace
+        0x1E140, // Nyiakeng Puachue Hmong
+        0x1E2F0, // Wancho
+        0x1E4F0, // Nag Mundari
+        0x1E950, // Adlam
+        0x1FBF0, // Segmented (Mathematical) Digits
     ];
     let cp = c as u32;
     for &z in DIGIT_ZEROS {
@@ -1416,8 +1416,9 @@ fn install_misc(env: &EnvRef) {
         Ok(cur)
     });
     define(env, "digit-value", Arity::Exact(1), |a| match &a[0] {
-        Value::Char(c) => Ok(unicode_digit_value(*c)
-            .map_or(Value::Bool(false), |d| Value::Int(i64::from(d)))),
+        Value::Char(c) => {
+            Ok(unicode_digit_value(*c).map_or(Value::Bool(false), |d| Value::Int(i64::from(d))))
+        }
         other => Err(type_err("char", other)),
     });
     define(env, "denominator", Arity::Exact(1), |a| match &a[0] {
@@ -1831,13 +1832,17 @@ fn install_inexact(env: &EnvRef) {
     define(env, "finite?", Arity::Exact(1), |a| match &a[0] {
         Value::Float(f) => Ok(Value::Bool(f.is_finite())),
         Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(true)),
-        Value::Complex(c) => Ok(Value::Bool(c.re_f64().is_finite() && c.im_f64().is_finite())),
+        Value::Complex(c) => Ok(Value::Bool(
+            c.re_f64().is_finite() && c.im_f64().is_finite(),
+        )),
         other => Err(type_err("number", other)),
     });
     define(env, "infinite?", Arity::Exact(1), |a| match &a[0] {
         Value::Float(f) => Ok(Value::Bool(f.is_infinite())),
         Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(false)),
-        Value::Complex(c) => Ok(Value::Bool(c.re_f64().is_infinite() || c.im_f64().is_infinite())),
+        Value::Complex(c) => Ok(Value::Bool(
+            c.re_f64().is_infinite() || c.im_f64().is_infinite(),
+        )),
         other => Err(type_err("number", other)),
     });
     define(env, "nan?", Arity::Exact(1), |a| match &a[0] {
@@ -2412,10 +2417,9 @@ fn install_strings(env: &EnvRef) {
             };
             if radix == 10 {
                 return match &a[0] {
-                    Value::Int(_)
-                    | Value::BigInt(_)
-                    | Value::Rational(_)
-                    | Value::Float(_) => Ok(Value::string(format!("{}", a[0]))),
+                    Value::Int(_) | Value::BigInt(_) | Value::Rational(_) | Value::Float(_) => {
+                        Ok(Value::string(format!("{}", a[0])))
+                    }
                     other => Err(type_err("number", other)),
                 };
             }

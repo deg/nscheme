@@ -713,16 +713,13 @@ impl<'a> Lexer<'a> {
                 // +inf.0 / +nan.0 — five-char identifiers.
                 let rest = &self.src[self.pos + sign.len_utf8()..];
                 let prefix5: String = rest.chars().take(5).collect();
-                if prefix5.eq_ignore_ascii_case("inf.0")
-                    || prefix5.eq_ignore_ascii_case("nan.0")
-                {
+                if prefix5.eq_ignore_ascii_case("inf.0") || prefix5.eq_ignore_ascii_case("nan.0") {
                     true
                 } else {
                     // R7RS `+i` / `-i` complex unit. The trailing `i`
                     // must be followed by a delimiter — otherwise we're
                     // looking at an identifier like `+inf.0xyz`.
-                    matches!(next, Some('i' | 'I'))
-                        && self.peek_char_at(2).is_none_or(is_delimiter)
+                    matches!(next, Some('i' | 'I')) && self.peek_char_at(2).is_none_or(is_delimiter)
                 }
             }
             _ => false,

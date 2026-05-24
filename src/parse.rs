@@ -193,14 +193,15 @@ impl Parser {
             }
             TokenKind::Number(num) => parse_number(&num, tok.span),
             TokenKind::DatumLabel(n) => self.parse_labelled(n, tok.span),
-            TokenKind::DatumRef(n) => self
-                .labels
-                .get(&n)
-                .cloned()
-                .ok_or(ParseError::UndefinedDatumLabel {
-                    label: n,
-                    span: tok.span,
-                }),
+            TokenKind::DatumRef(n) => {
+                self.labels
+                    .get(&n)
+                    .cloned()
+                    .ok_or(ParseError::UndefinedDatumLabel {
+                        label: n,
+                        span: tok.span,
+                    })
+            }
         }
     }
 
@@ -470,20 +471,16 @@ fn parse_rectangular_complex(
     // inexact one).
     match inner {
         "+" => {
-            return Ok(Some(Value::Complex(Rc::new(
-                crate::value::ComplexValue {
-                    re: Value::Int(0),
-                    im: Value::Int(1),
-                },
-            ))));
+            return Ok(Some(Value::Complex(Rc::new(crate::value::ComplexValue {
+                re: Value::Int(0),
+                im: Value::Int(1),
+            }))));
         }
         "-" => {
-            return Ok(Some(Value::Complex(Rc::new(
-                crate::value::ComplexValue {
-                    re: Value::Int(0),
-                    im: Value::Int(-1),
-                },
-            ))));
+            return Ok(Some(Value::Complex(Rc::new(crate::value::ComplexValue {
+                re: Value::Int(0),
+                im: Value::Int(-1),
+            }))));
         }
         "" => return Err(bad()),
         _ => {}
@@ -503,12 +500,10 @@ fn parse_rectangular_complex(
     let Some(at) = split else {
         // Entirely imaginary, e.g. `5i`, `1.5i`, `3/4i`.
         let imag_value = real_str_to_value(inner, num, bad)?;
-        return Ok(Some(Value::Complex(Rc::new(
-            crate::value::ComplexValue {
-                re: Value::Int(0),
-                im: imag_value,
-            },
-        ))));
+        return Ok(Some(Value::Complex(Rc::new(crate::value::ComplexValue {
+            re: Value::Int(0),
+            im: imag_value,
+        }))));
     };
     let (real_str, imag_str) = inner.split_at(at);
     let imag_str = match imag_str {
@@ -524,12 +519,10 @@ fn parse_rectangular_complex(
         // Exact-zero imaginary part: collapse to the real value.
         return Ok(Some(real_value));
     }
-    Ok(Some(Value::Complex(Rc::new(
-        crate::value::ComplexValue {
-            re: real_value,
-            im: imag_value,
-        },
-    ))))
+    Ok(Some(Value::Complex(Rc::new(crate::value::ComplexValue {
+        re: real_value,
+        im: imag_value,
+    }))))
 }
 
 fn parse_polar_complex(
@@ -582,7 +575,9 @@ fn real_str_to_value(
         return Ok(normalize_rational(r));
     }
     let exp_chars = ['s', 'S', 'f', 'F', 'd', 'D', 'l', 'L'];
-    let has_marker = s.contains('.') || s.chars().any(|c| c == 'e' || c == 'E' || exp_chars.contains(&c));
+    let has_marker = s.contains('.')
+        || s.chars()
+            .any(|c| c == 'e' || c == 'E' || exp_chars.contains(&c));
     if has_marker {
         let normalised: String = s
             .chars()
@@ -606,10 +601,7 @@ fn real_str_to_value(
     Ok(promote_bigint(big))
 }
 
-fn real_str_to_f64(
-    s: &str,
-    bad: impl Fn() -> ParseError + Copy,
-) -> Result<f64, ParseError> {
+fn real_str_to_f64(s: &str, bad: impl Fn() -> ParseError + Copy) -> Result<f64, ParseError> {
     let dummy = NumberLexeme {
         radix: 10,
         exactness: Exactness::Inexact,

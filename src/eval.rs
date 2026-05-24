@@ -209,7 +209,11 @@ pub enum Frame {
     /// re-enter (`before`) or leave (`after`) the wind correctly.
     /// `id` distinguishes nested winds across continuation
     /// invocations.
-    DynamicWind { id: u64, before: Value, after: Value },
+    DynamicWind {
+        id: u64,
+        before: Value,
+        after: Value,
+    },
     /// `dynamic-wind` helper: after the user thunk returns, fire
     /// the `after` thunk. We save the thunk's result first (the
     /// frame transitions to `DynamicWindFinish` once `after` runs).
@@ -264,16 +268,10 @@ pub fn eval(expr: Value, env: EnvRef) -> Result<Value, EvalError> {
                 let tgt_winds = wind_chain(&saved);
                 let lca = wind_lca(&cur_winds, &tgt_winds);
                 // afters: from current[lca..] innermost first
-                let afters: Vec<Value> = cur_winds[lca..]
-                    .iter()
-                    .rev()
-                    .map(|w| w.2.clone())
-                    .collect();
+                let afters: Vec<Value> =
+                    cur_winds[lca..].iter().rev().map(|w| w.2.clone()).collect();
                 // befores: from target[lca..] outermost first
-                let befores: Vec<Value> = tgt_winds[lca..]
-                    .iter()
-                    .map(|w| w.1.clone())
-                    .collect();
+                let befores: Vec<Value> = tgt_winds[lca..].iter().map(|w| w.1.clone()).collect();
                 if afters.is_empty() && befores.is_empty() {
                     frames = saved;
                     Step::Return(value)
@@ -428,9 +426,8 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
     if let Value::SyntaxRef { name, env: def_env } = &head {
         if let Some(value) = def_env.lookup(name) {
             if let Value::Macro(rules) = value {
-                let args = collect_list(&tail).map_err(|()| {
-                    EvalError::malformed("macro", "argument list must be proper")
-                })?;
+                let args = collect_list(&tail)
+                    .map_err(|()| EvalError::malformed("macro", "argument list must be proper"))?;
                 let call_form = Value::cons(Value::Symbol(name.clone()), Value::list_from(args));
                 let expanded = crate::macros::expand(&rules, &call_form)?;
                 return Ok(Step::Eval(expanded, env));
@@ -442,9 +439,8 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
         }
         if let Some(value) = env.lookup(name) {
             if let Value::Macro(rules) = value {
-                let args = collect_list(&tail).map_err(|()| {
-                    EvalError::malformed("macro", "argument list must be proper")
-                })?;
+                let args = collect_list(&tail)
+                    .map_err(|()| EvalError::malformed("macro", "argument list must be proper"))?;
                 let call_form = Value::cons(Value::Symbol(name.clone()), Value::list_from(args));
                 let expanded = crate::macros::expand(&rules, &call_form)?;
                 return Ok(Step::Eval(expanded, env));
@@ -464,9 +460,8 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
         // dispatch separately below).
         if let Some(value) = env.lookup(sym) {
             if let Value::Macro(rules) = value {
-                let args = collect_list(&tail).map_err(|()| {
-                    EvalError::malformed("macro", "argument list must be proper")
-                })?;
+                let args = collect_list(&tail)
+                    .map_err(|()| EvalError::malformed("macro", "argument list must be proper"))?;
                 let call_form = Value::cons(Value::Symbol(sym.clone()), Value::list_from(args));
                 let expanded = crate::macros::expand(&rules, &call_form)?;
                 return Ok(Step::Eval(expanded, env));
@@ -1395,9 +1390,7 @@ fn wind_chain(frames: &[Frame]) -> Vec<(u64, Value, Value)> {
     frames
         .iter()
         .filter_map(|f| match f {
-            Frame::DynamicWind { id, before, after } => {
-                Some((*id, before.clone(), after.clone()))
-            }
+            Frame::DynamicWind { id, before, after } => Some((*id, before.clone(), after.clone())),
             _ => None,
         })
         .collect()
@@ -1428,11 +1421,7 @@ fn wind_lca(a: &[(u64, Value, Value)], b: &[(u64, Value, Value)]) -> usize {
 /// after)` so the operands evaluate via the normal `CallArg`
 /// machinery, and the `%dynamic-wind-apply` primitive then sets up
 /// the wind frames and returns a multi-step plan.
-fn step_dynamic_wind(
-    tail: Value,
-    env: EnvRef,
-    frames: &mut Vec<Frame>,
-) -> Result<Step, EvalError> {
+fn step_dynamic_wind(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
     let parts = collect_list(&tail).map_err(|()| {
         EvalError::malformed("dynamic-wind", "expected (dynamic-wind before thunk after)")
     })?;

@@ -426,7 +426,9 @@ fn literal_matches(pattern: &Value, literals: &[Value]) -> bool {
     let Some(key) = VarKey::from_value(pattern) else {
         return false;
     };
-    literals.iter().any(|l| VarKey::from_value(l) == Some(key.clone()))
+    literals
+        .iter()
+        .any(|l| VarKey::from_value(l) == Some(key.clone()))
 }
 
 /// R7RS §4.3.2 literal-vs-input check. Both must be identifiers,
@@ -435,8 +437,7 @@ fn literal_matches(pattern: &Value, literals: &[Value]) -> bool {
 ///   - both are unbound and `bound-identifier=?` (same name + same
 ///     hygiene mark).
 fn input_matches_literal(input: &Value, lit: &Value) -> bool {
-    let (Some(input_key), Some(lit_key)) =
-        (VarKey::from_value(input), VarKey::from_value(lit))
+    let (Some(input_key), Some(lit_key)) = (VarKey::from_value(input), VarKey::from_value(lit))
     else {
         return false;
     };
@@ -448,15 +449,10 @@ fn input_matches_literal(input: &Value, lit: &Value) -> bool {
     // this by checking name equality alone for unmarked
     // identifiers, since we have no binding-time info here for
     // user-side input.
-    input_key.name == lit_key.name
-        && (input_key.scope.is_none() || lit_key.scope.is_none())
+    input_key.name == lit_key.name && (input_key.scope.is_none() || lit_key.scope.is_none())
 }
 
-fn collect_pattern_vars(
-    pattern: &Value,
-    literals: &[Value],
-    ellipsis: &Symbol,
-) -> Vec<VarKey> {
+fn collect_pattern_vars(pattern: &Value, literals: &[Value], ellipsis: &Symbol) -> Vec<VarKey> {
     let mut out: Vec<VarKey> = Vec::new();
     collect_pattern_vars_into(pattern, literals, ellipsis, &mut out);
     out
@@ -556,16 +552,18 @@ fn instantiate_inner(
                 let (elems, _) = pattern_elems(template);
                 if elems.len() == 2 && is_named_ellipsis(&elems[0], ellipsis) {
                     return instantiate_inner(
-                        &elems[1],
-                        bindings,
-                        renames,
-                        ellipsis,
-                        def_env,
-                        true,
+                        &elems[1], bindings, renames, ellipsis, def_env, true,
                     );
                 }
             }
-            instantiate_list(template, bindings, renames, ellipsis, def_env, escape_ellipsis)
+            instantiate_list(
+                template,
+                bindings,
+                renames,
+                ellipsis,
+                def_env,
+                escape_ellipsis,
+            )
         }
         _ => Ok(template.clone()),
     }
@@ -586,10 +584,7 @@ fn instantiate_list(
         // Ellipsis-repetition is suppressed when we're inside an
         // `(<ellipsis> X)` escape; in that case the ellipsis is just
         // a symbol.
-        if !escape_ellipsis
-            && i + 1 < elems.len()
-            && is_named_ellipsis(&elems[i + 1], ellipsis)
-        {
+        if !escape_ellipsis && i + 1 < elems.len() && is_named_ellipsis(&elems[i + 1], ellipsis) {
             // Collect the multi-binding for the variables in elems[i].
             let pattern_vars = collect_template_vars(&elems[i], bindings);
             // All vars must agree on the number of repetitions.
