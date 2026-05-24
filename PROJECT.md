@@ -1,28 +1,30 @@
 # Building nscheme: An Experiment in AI-Assisted Implementation
 
-I started this on a Thursday afternoon. By Sunday morning the repository held a working Scheme interpreter — 13,000 lines of Rust, passing every assertion in the standard R7RS conformance suite that ships with chibi-scheme. Claude had spent maybe six hours on it. I had personally spent about ninety minutes.
+I started this on a Thursday afternoon, very part-time. By Sunday morning the repository held a working Scheme interpreter — 13,000 lines of Rust, passing every assertion in the standard R7RS conformance suite that ships with chibi-scheme [[Insert link]]. Claude had spent maybe six hours on it. I had personally spent about ninety minutes.
 
 That's the headline. The rest of this is the texture: what worked, where I had to push, what I learned, and what was already true that I just got to confirm.
 
-One disclosure up front, because it would be dishonest not to: the document you're reading is itself written by Claude. I shaped what it covers, supplied my own writing as a style reference, and reviewed the draft. The prose is the agent's; the editorial choices are mine. The same is true of essentially every other markdown file in the repository — the README, the seven ADRs, the bead descriptions. The collaboration is the work.
+One disclosure up front: The document you're reading right now was written by Claude. I just shaped what it covers, supplied my own writing as a style reference, and reviewed the draft. The prose is the agent's; the editorial choices are mine. The same is true of essentially every other markdown file in the repository — the README, the ADRs, the bead descriptions. The collaboration is the work.
 
 ## Why R7RS-small
 
-I've been a programmer since the late 1970s, and I cut my teeth at MIT in the early '80s on Symbolics Lisp machines. Lisp has been a comfortable home dialect for me ever since. R7RS-small is the finalised 2013 revised report on Scheme — a tight 88-page specification of the small core language that most modern Scheme implementations track.
+I've been a programmer since the late 1970s, and I cut my teeth at MIT on Symbolics Lisp machines. Lisps have been a comfortable home dialect for me ever since. R7RS-small is the finalised 2013 revised report on Scheme — a tight 88-page specification of the small core language that most modern Scheme implementations track.
 
 For this experiment I wanted three properties:
 
 A precise spec, so "done" wasn't a matter of opinion.
 
-A standard test suite. The chibi-scheme implementation ships [`r7rs-tests.scm`](tests/r7rs-corpus/chibi-r7rs-tests.scm), the de facto R7RS-small conformance corpus — 1180 top-level forms running 1225 individual assertions. Either the number goes up, or it doesn't.
+A standard test suite. The chibi-scheme implementation ships [`r7rs-tests.scm`](tests/r7rs-corpus/chibi-r7rs-tests.scm), the de facto R7RS-small conformance corpus — 1180 top-level forms running 1225 individual assertions.
 
 No novelty. I wasn't interested in whether Claude could invent something new. I wanted to know whether it could ship something well-defined, the way a real implementation team would.
 
 The language I asked Claude to implement it in was Rust — my call, not the agent's. I wanted the discipline of strict types. I wanted clippy on every commit. I wanted `cargo build` to refuse to compile against an incomplete enum match. Rust caught more bugs over the weekend than I want to count.
 
+Most important, I wanted a solid language in which I have never programmed myself -- I did not want to bias the work with my knowledge. 
+
 ## Thursday afternoon
 
-I started by setting Claude's working agreement. I use beads — a SQLite-backed issue tracker meant to be shared between humans and agents — to break work into named units and tie commits to them. Then I took the brakes off:
+I started by setting Claude's working environment. I use beads [[insert link]]— a DB-backed issue tracker meant to be shared between humans and agents — to break work into named units and tie commits to them. Then I took the brakes off:
 
 > 1) You may commit without my authorization for each commit.
 > 2) You should commit at least once per bead.
@@ -57,7 +59,7 @@ And:
 
 > I'd like the full spec now.
 
-Each time, a wall came down that hadn't actually been there. The "limitation" — say, `dynamic-wind` through `call/cc`, or the exact-complex numeric tower, or full sets-of-scopes-style macro hygiene — turned out to be implementable in a session. Claude would file the bead, write the code, close the bead, and the conformance number would leap by fifty or a hundred assertions.
+Each time, a wall came down that hadn't actually been there. The "limitation" — say, `dynamic-wind` through `call/cc`, or the exact-complex numeric tower, or full sets-of-scopes-style macro hygiene — turned out to be implementable in a session. Claude would file the bead, write the code, close the bead, and the conformance number would improve by fifty or a hundred assertions.
 
 The agent's threshold for "done" sat several notches below the project's. The completed spec was always within reach. I just had to ask for it, and ask again.
 
@@ -71,7 +73,7 @@ Sometimes the push was a real ask. The macro hygiene system started out as textb
 
 After roughly six hours of agent time and one or two of mine:
 
-The interpreter passes 1225 of 1225 assertions in the chibi r7rs-tests corpus. All 1180 top-level forms evaluate cleanly. The corpus file is verbatim from upstream; only our `(chibi test)` reimplementation deviates in one place — float comparison uses relative tolerance rather than bit-exact equality. The reason is documented (the chibi corpus hard-codes 15-significant-digit float literals that don't bit-match libm's 17-digit results), and the fix is filed as a follow-up bead.
+The interpreter passes all 1225 assertions in the chibi r7rs-tests corpus. All 1180 top-level forms evaluate cleanly. The corpus file is verbatim from upstream; only our `(chibi test)` reimplementation deviates in one place — float comparison uses relative tolerance rather than bit-exact equality. The reason is documented (the chibi corpus hard-codes 15-significant-digit float literals that don't bit-match libm's 17-digit results), and the fix is filed as a follow-up bead.
 
 The repository has 47 closed beads, 20 open follow-ups against documented gaps (mostly R7RS-large libraries — Red Edition and Tangerine Edition — and forward-looking refinements), and seven Architecture Decision Records covering the load-bearing design choices. No clippy warnings. Each special form has its own `step_*` function with a doc comment naming the R7RS section it implements. I could hand this code to a competent Rust developer without apology.
 
@@ -127,4 +129,4 @@ But the result was not free, and it was not autonomous in the strongest sense. T
 
 If the question was "can an AI agent implement R7RS-small from a fresh repo?" — the answer is yes. If the question was "can it do so without a human deciding what 'finished' means?" — the answer is no, at least not with this agent on this day. The interesting result is how much of the gap is technical capability and how much is calibration. In this project, it was mostly calibration. The agent could do the work. It just had to be asked to.
 
-The instinct is old. The partner is new.
+The instinct is old. The partner is new. [[I don't like this closing line]]
