@@ -16,11 +16,9 @@ fn main() {
         .spawn(|| {
             let env = Env::new_global();
             install_base(&env).unwrap();
-            let shim =
-                std::fs::read_to_string("tests/r7rs-corpus/chibi-test-shim.scm").unwrap();
+            let shim = std::fs::read_to_string("tests/r7rs-corpus/chibi-test-shim.scm").unwrap();
             eval_source(&shim, env.clone()).unwrap();
-            let corpus =
-                std::fs::read_to_string("tests/r7rs-corpus/chibi-r7rs-tests.scm").unwrap();
+            let corpus = std::fs::read_to_string("tests/r7rs-corpus/chibi-r7rs-tests.scm").unwrap();
             let datums = parse_program(&corpus).unwrap();
             // Bucket errors by their formatted message; record the
             // first few datum indices that hit each bucket so the
