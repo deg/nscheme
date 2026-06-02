@@ -150,6 +150,18 @@ impl Env {
         self.frame.borrow_mut().insert(name, cell);
     }
 
+    /// Snapshot every binding in *this* frame as `(name, cell)` pairs.
+    /// The cells are shared (cloned `Rc`s), not copied values. Used to
+    /// enumerate a built-in library's exports when an import qualifier
+    /// (`only`/`except`/`prefix`/`rename`) needs the full binding set.
+    pub fn frame_cells(&self) -> Vec<(Symbol, Cell)> {
+        self.frame
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
     /// Number of bindings in this frame (does not count ancestors).
     /// Mostly for diagnostics and tests.
     pub fn local_len(&self) -> usize {

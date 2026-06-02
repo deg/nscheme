@@ -70,6 +70,7 @@
 // would obscure the dispatch.
 #![allow(clippy::too_many_lines)]
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use thiserror::Error;
@@ -743,7 +744,6 @@ fn step_let_syntax(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<
 /// `(export …)`, `(import …)`, `(begin …)`, `(include "file")`,
 /// `(cond-expand …)`.
 fn step_define_library(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
-    use std::collections::HashMap;
     let (name_form, decls_tail) = tail
         .as_pair()
         .ok_or_else(|| EvalError::malformed("define-library", "expected name and decls"))?;
@@ -843,27 +843,135 @@ fn step_import(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
 }
 
 fn import_one(lib_form: &Value, target: &EnvRef) -> Result<(), EvalError> {
-    let lib_name = crate::library::parse_library_name(lib_form)?;
-    if crate::library::is_builtin_library(&lib_name) {
-        // Bindings already installed by install_base.
+    // Fast path: a *plain* built-in library name needs no work — its
+    // bindings are already global. Qualified forms like
+    // `(only (scheme base) car)` are not valid library names, so they
+    // fail `parse_library_name` and fall through to the resolver.
+    if let Ok(name) = crate::library::parse_library_name(lib_form)
+        && crate::library::is_builtin_library(&name)
+    {
         return Ok(());
     }
+    for (name, cell) in resolve_import_set(lib_form)? {
+        target.bind_cell(name, cell);
+    }
+    Ok(())
+}
+
+/// Resolve an import-set (R7RS §5.6.1) to the `name -> cell` bindings it
+/// contributes, applying any `only` / `except` / `rename` / `prefix`
+/// qualifier. Qualifiers nest: the second element of each form is itself
+/// an import-set, so `(prefix (only (lib) a b) p:)` works.
+fn resolve_import_set(form: &Value) -> Result<HashMap<Symbol, crate::env::Cell>, EvalError> {
+    if let Some((Value::Symbol(kw), _)) = form.as_pair() {
+        match kw.name() {
+            "only" => {
+                let (inner, ids) = import_qualifier_parts(form, "only")?;
+                let mut base = resolve_import_set(&inner)?;
+                let mut out = HashMap::new();
+                for id in &ids {
+                    let n = import_identifier(id, "only")?;
+                    let cell = base.remove(&n).ok_or_else(|| {
+                        EvalError::malformed("only", format!("not exported: {}", n.name()))
+                    })?;
+                    out.insert(n, cell);
+                }
+                return Ok(out);
+            }
+            "except" => {
+                let (inner, ids) = import_qualifier_parts(form, "except")?;
+                let mut base = resolve_import_set(&inner)?;
+                for id in &ids {
+                    let n = import_identifier(id, "except")?;
+                    if base.remove(&n).is_none() {
+                        return Err(EvalError::malformed(
+                            "except",
+                            format!("not exported: {}", n.name()),
+                        ));
+                    }
+                }
+                return Ok(base);
+            }
+            "prefix" => {
+                let (inner, args) = import_qualifier_parts(form, "prefix")?;
+                let [prefix] = args.as_slice() else {
+                    return Err(EvalError::malformed("prefix", "expected a single prefix"));
+                };
+                let prefix = import_identifier(prefix, "prefix")?;
+                let base = resolve_import_set(&inner)?;
+                let mut out = HashMap::new();
+                for (n, cell) in base {
+                    let renamed = Symbol::intern(&format!("{}{}", prefix.name(), n.name()));
+                    out.insert(renamed, cell);
+                }
+                return Ok(out);
+            }
+            "rename" => {
+                let (inner, pairs) = import_qualifier_parts(form, "rename")?;
+                let mut base = resolve_import_set(&inner)?;
+                for pair in &pairs {
+                    let renaming = collect_list(pair).map_err(|()| {
+                        EvalError::malformed("rename", "renaming must be (from to)")
+                    })?;
+                    let [from, to] = renaming.as_slice() else {
+                        return Err(EvalError::malformed("rename", "renaming must be (from to)"));
+                    };
+                    let from = import_identifier(from, "rename")?;
+                    let to = import_identifier(to, "rename")?;
+                    let cell = base.remove(&from).ok_or_else(|| {
+                        EvalError::malformed("rename", format!("not exported: {}", from.name()))
+                    })?;
+                    base.insert(to, cell);
+                }
+                return Ok(base);
+            }
+            _ => {}
+        }
+    }
+    // Base case: a plain library name.
+    resolve_base_library(form)
+}
+
+/// Split an import-set qualifier form `(kw <import-set> arg...)` into its
+/// inner import-set and the trailing argument list.
+fn import_qualifier_parts(
+    form: &Value,
+    kw: &'static str,
+) -> Result<(Value, Vec<Value>), EvalError> {
+    let parts =
+        collect_list(form).map_err(|()| EvalError::malformed(kw, "import set must be a list"))?;
+    if parts.len() < 2 {
+        return Err(EvalError::malformed(kw, "expected an import set"));
+    }
+    Ok((parts[1].clone(), parts[2..].to_vec()))
+}
+
+/// Interpret an import-set element as a bare identifier.
+fn import_identifier(v: &Value, kw: &'static str) -> Result<Symbol, EvalError> {
+    match v {
+        Value::Symbol(s) => Ok(s.clone()),
+        _ => Err(EvalError::malformed(kw, "expected an identifier")),
+    }
+}
+
+/// Resolve a plain library name to its exported bindings, loading it
+/// from disk if necessary.
+fn resolve_base_library(form: &Value) -> Result<HashMap<Symbol, crate::env::Cell>, EvalError> {
+    let lib_name = crate::library::parse_library_name(form)?;
+    if crate::library::is_builtin_library(&lib_name) {
+        return crate::library::builtin_bindings();
+    }
     // Not built-in and not yet registered: try loading it from the
-    // filesystem search path (bead nscheme-9q5). A successful load
-    // registers the library so library_bindings below finds it.
+    // filesystem search path (bead nscheme-9q5).
     if crate::library::library_bindings(&lib_name).is_none() {
         crate::library::try_load_library(&lib_name)?;
     }
-    let bindings = crate::library::library_bindings(&lib_name).ok_or_else(|| {
+    crate::library::library_bindings(&lib_name).ok_or_else(|| {
         EvalError::malformed(
             "import",
             format!("unknown library: ({})", lib_name.join(" ")),
         )
-    })?;
-    for (name, cell) in bindings {
-        target.bind_cell(name, cell);
-    }
-    Ok(())
+    })
 }
 
 /// `(apply proc a1 a2 ... arglist)` — spreads `arglist` as the trailing

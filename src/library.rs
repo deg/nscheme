@@ -229,20 +229,36 @@ pub fn try_load_library(name: &LibraryName) -> Result<bool, EvalError> {
     };
     let source = std::fs::read_to_string(&path)
         .map_err(|e| malformed(&format!("reading library ({}): {e}", name.join(" "))))?;
-    let root = LOADER_ROOT.with(|slot| {
+    crate::eval::eval_source(&source, loader_root()?)?;
+    // The file should have registered the library. If it named a
+    // different library than the one we were asked for, this is false
+    // and the caller reports "unknown library".
+    Ok(library_exists(name))
+}
+
+/// The hermetic, base-installed root environment used both to evaluate
+/// loaded library files and to resolve qualified imports of built-in
+/// libraries. Built lazily on first use and reused for the thread.
+pub fn loader_root() -> Result<EnvRef, EvalError> {
+    LOADER_ROOT.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.is_none() {
             let env = Env::new_global();
             crate::builtins::install_base(&env)?;
             *slot = Some(env);
         }
-        Ok::<EnvRef, EvalError>(slot.as_ref().unwrap().clone())
-    })?;
-    crate::eval::eval_source(&source, root)?;
-    // The file should have registered the library. If it named a
-    // different library than the one we were asked for, this is false
-    // and the caller reports "unknown library".
-    Ok(library_exists(name))
+        Ok(slot.as_ref().unwrap().clone())
+    })
+}
+
+/// Enumerate the bindings of a built-in library as shared cells. Since
+/// `install_base` installs every built-in library into one global
+/// frame, this returns the full built-in surface rather than just one
+/// library's exports — exact enough for `only`/`rename` (which name
+/// identifiers explicitly) and a slight over-approximation for
+/// `prefix`/`except` on a built-in (uncommon in practice).
+pub fn builtin_bindings() -> Result<HashMap<Symbol, Cell>, EvalError> {
+    Ok(loader_root()?.frame_cells().into_iter().collect())
 }
 
 fn collect_list(v: &Value) -> Option<Vec<Value>> {
