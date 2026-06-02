@@ -2676,10 +2676,18 @@ fn step_apply(
         }
         Procedure::Continuation { frames: saved } => {
             // Invoking a captured continuation: replace the current
-            // frame stack and resume by returning the supplied value.
-            // R7RS allows multi-value continuations; we take the first
-            // arg (or Unspecified for 0-arg invocation).
-            let value = args.into_iter().next().unwrap_or(Value::Unspecified);
+            // frame stack and resume by returning the supplied value(s).
+            // R7RS allows a continuation to be called with any number of
+            // values, so we package them exactly as the `values`
+            // primitive does: one arg passes through as a single value;
+            // zero or many become a `Values` packet that
+            // call-with-values can spread. This is what lets idioms like
+            // `(call/cc (lambda (k) (k a b)))` consumed by a two-value
+            // receiver work (e.g. SRFI 1's %cars+cdrs).
+            let value = match args.len() {
+                1 => args.into_iter().next().unwrap(),
+                _ => Value::Values(Rc::new(args)),
+            };
             Ok(Step::InvokeContinuation(saved.clone(), value))
         }
         Procedure::CaseLambda {

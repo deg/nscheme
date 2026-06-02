@@ -19,6 +19,34 @@ fn call_cc_returns_value_when_continuation_unused() {
 }
 
 #[test]
+fn continuation_carries_multiple_values() {
+    // R7RS: a continuation may be invoked with any number of values.
+    // (k a b) consumed by a two-argument receiver must see both.
+    let v = run("(call-with-values
+           (lambda () (call/cc (lambda (k) (k 1 2))))
+           (lambda (a b) (+ a b)))")
+    .unwrap();
+    assert!(equal(&v, &Value::Int(3)));
+}
+
+#[test]
+fn continuation_with_zero_values() {
+    // (k) delivers zero values; a rest-arg receiver sees an empty list.
+    let v = run("(call-with-values
+           (lambda () (call/cc (lambda (k) (k))))
+           (lambda vals (length vals)))")
+    .unwrap();
+    assert!(equal(&v, &Value::Int(0)));
+}
+
+#[test]
+fn continuation_single_value_unchanged() {
+    // The common one-value case is untouched by multi-value support.
+    let v = run("(+ 1 (call/cc (lambda (k) (k 41))))").unwrap();
+    assert!(equal(&v, &Value::Int(42)));
+}
+
+#[test]
 fn escape_continuation() {
     // Classic escape: jump out of a computation.
     let src = "
