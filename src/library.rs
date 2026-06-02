@@ -164,6 +164,14 @@ thread_local! {
     /// Thread-local, so tests running in parallel don't interfere and
     /// no `unsafe` env mutation is needed. See [`set_search_path`].
     static SEARCH_PATH_OVERRIDE: RefCell<Option<Vec<PathBuf>>> = const { RefCell::new(None) };
+
+    /// Libraries whose load is in progress on this thread. A library is
+    /// only `register`ed *after* its `define-library` form finishes
+    /// evaluating, so `library_exists` stays false for the whole load —
+    /// which is fine for a diamond (A→B, A→C, B→C: C just loads once)
+    /// but would recurse forever on a true cycle (A→B, B→A). This set
+    /// catches the cycle and turns it into a clean error.
+    static LOADING: RefCell<Vec<LibraryName>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Replace the library search path for the current thread. Primarily
@@ -219,17 +227,30 @@ fn find_library_file(name: &LibraryName) -> Option<PathBuf> {
 /// file was found but failed to read or evaluate.
 pub fn try_load_library(name: &LibraryName) -> Result<bool, EvalError> {
     // Already registered (e.g. a diamond import resolved earlier) —
-    // nothing to do. This also makes the DAG of inter-library imports
-    // terminate without a separate cycle guard for the common case.
+    // nothing to do.
     if library_exists(name) {
         return Ok(true);
+    }
+    // A library that (transitively) imports itself would otherwise
+    // re-read and re-eval forever, since it isn't registered until its
+    // load completes. Detect the cycle and report it.
+    if LOADING.with(|s| s.borrow().contains(name)) {
+        return Err(malformed(&format!(
+            "circular library dependency: ({})",
+            name.join(" ")
+        )));
     }
     let Some(path) = find_library_file(name) else {
         return Ok(false);
     };
     let source = std::fs::read_to_string(&path)
         .map_err(|e| malformed(&format!("reading library ({}): {e}", name.join(" "))))?;
-    crate::eval::eval_source(&source, loader_root()?)?;
+    LOADING.with(|s| s.borrow_mut().push(name.clone()));
+    let result = crate::eval::eval_source(&source, loader_root()?);
+    LOADING.with(|s| {
+        s.borrow_mut().pop();
+    });
+    result?;
     // The file should have registered the library. If it named a
     // different library than the one we were asked for, this is false
     // and the caller reports "unknown library".

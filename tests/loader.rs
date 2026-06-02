@@ -60,6 +60,22 @@ fn loaded_library_mutable_state_is_shared() {
 }
 
 #[test]
+fn circular_dependency_errors_cleanly() {
+    // (cyc x) imports (cyc y) which imports (cyc x): the loader must
+    // report a cycle, not recurse until the stack overflows.
+    let err = run_with_fixtures("(import (cyc x))").unwrap_err();
+    match err {
+        EvalError::MalformedForm { message, .. } => {
+            assert!(
+                message.contains("circular"),
+                "expected a circular-dependency error, got: {message}"
+            );
+        }
+        other => panic!("expected MalformedForm, got {other:?}"),
+    }
+}
+
+#[test]
 fn unknown_library_not_on_path_errors() {
     // No file for (loadtest nope): the loader finds nothing and the
     // import reports an unknown library rather than silently passing.
