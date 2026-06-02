@@ -157,3 +157,21 @@ fn macro_with_multiple_clauses() {
     ]);
     assert!(equal(&run(src).unwrap(), &expected));
 }
+
+#[test]
+fn macro_template_introduces_named_let_binding() {
+    // A template that expands to a named `let` binds identifiers the
+    // macro introduced (the loop name and the loop variable). The
+    // let/letrec binding parser must accept these macro-introduced
+    // (hygienic) binding names, not only bare symbols. Regression for
+    // the SRFI 41 stream-of comprehension breakage.
+    let src = "
+        (define-syntax sum-to
+          (syntax-rules ()
+            ((_ n)
+             (let loop ((i 0) (acc 0))
+               (if (> i n) acc (loop (+ i 1) (+ acc i)))))))
+        (sum-to 5)
+    ";
+    assert!(equal(&run(src).unwrap(), &Value::Int(15)));
+}

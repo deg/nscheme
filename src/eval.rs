@@ -2529,7 +2529,7 @@ fn parse_bindings(form: &Value, context: &'static str) -> Result<Vec<(Symbol, Va
                 "each binding must be (name value)",
             ));
         }
-        let Value::Symbol(name) = parts[0].clone() else {
+        let Some(name) = binding_symbol(&parts[0]) else {
             return Err(EvalError::malformed(
                 context,
                 "binding name must be a symbol",
@@ -2543,6 +2543,23 @@ fn parse_bindings(form: &Value, context: &'static str) -> Result<Vec<(Symbol, Va
 /// Helper: shortcut for building a `Symbol` value.
 fn sym(name: &str) -> Value {
     Value::Symbol(Symbol::intern(name))
+}
+
+/// Interpret a value used in *binding position* (a `let`/`letrec`/`do`
+/// binding name, a named-`let` loop name, a lambda formal) as a symbol.
+///
+/// A binding name can arrive either as a plain `Value::Symbol` or, when
+/// a macro template introduced it, as a `Value::SyntaxRef`. nscheme's
+/// hygiene model resolves a macro-introduced *reference* by its
+/// underlying `name` symbol (see the `SyntaxRef` arm of `eval`), so a
+/// macro-introduced *binding* must bind that same symbol for the two to
+/// meet. This unwraps both forms to that symbol.
+fn binding_symbol(v: &Value) -> Option<Symbol> {
+    match v {
+        Value::Symbol(s) => Some(s.clone()),
+        Value::SyntaxRef { name, .. } => Some(name.clone()),
+        _ => None,
+    }
 }
 
 /// Helper: build a list from a slice of items, returning a constructor
