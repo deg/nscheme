@@ -105,9 +105,9 @@ pub fn is_builtin_library(name: &LibraryName) -> bool {
         // We preload that shim into the global env outside the
         // library system, so the import is a no-op.
         [s, b] if s == "chibi" && b == "test" => true,
-        // Same for SRFI 64 (the upstream test framework chibi's
-        // suite was derived from).
-        [s, b] if s == "srfi" && b == "64" => true,
+        // NOTE: `(srfi 64)` is a real on-disk library (lib/srfi/64.sld),
+        // not a builtin no-op, so reference test suites that import it
+        // get the actual harness.
         _ => false,
     }
 }
