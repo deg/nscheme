@@ -219,3 +219,17 @@ fn cond_expand_library_clause_finds_on_disk_library() {
         &Value::Symbol(Symbol::intern("have-69"))
     ));
 }
+
+#[test]
+fn export_rename_spec() {
+    // R7RS export supports (rename <internal> <external>): the binding is
+    // defined internally under one name and exported under another.
+    let src = "
+        (define-library (test ren)
+          (export (rename internal external))
+          (begin (define internal 42)))
+        (import (test ren))
+        external
+    ";
+    assert!(equal(&run(src).unwrap(), &Value::Int(42)));
+}

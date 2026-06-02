@@ -751,18 +751,20 @@ fn step_define_library(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
     let decls = collect_list(&decls_tail)
         .map_err(|()| EvalError::malformed("define-library", "decls must be a proper list"))?;
     let lib_env = crate::env::Env::extend(env.clone());
-    let mut exports: Vec<Symbol> = Vec::new();
+    // Each export is (external-name, internal-name); they differ only
+    // for `(rename internal external)` specs.
+    let mut exports: Vec<(Symbol, Symbol)> = Vec::new();
     process_library_decls(&decls, &lib_env, &mut exports)?;
     // Collect exported bindings into a registry entry. We store the
     // *cells*, not their current values, so importers share the
     // library's mutable bindings rather than copying them (bead
     // nscheme-q1c).
     let mut bindings: HashMap<Symbol, crate::env::Cell> = HashMap::new();
-    for name in exports {
-        let cell = lib_env.cell(&name).ok_or_else(|| {
+    for (external, internal) in exports {
+        let cell = lib_env.cell(&internal).ok_or_else(|| {
             EvalError::malformed("define-library", "exported name was not defined")
         })?;
-        bindings.insert(name, cell);
+        bindings.insert(external, cell);
     }
     crate::library::register_library(lib_name, bindings);
     Ok(Step::Return(Value::Unspecified))
@@ -771,7 +773,7 @@ fn step_define_library(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
 fn process_library_decls(
     decls: &[Value],
     lib_env: &EnvRef,
-    exports: &mut Vec<Symbol>,
+    exports: &mut Vec<(Symbol, Symbol)>,
 ) -> Result<(), EvalError> {
     for decl in decls {
         let parts = collect_list(decl)
@@ -788,10 +790,34 @@ fn process_library_decls(
         match head.name() {
             "export" => {
                 for e in &parts[1..] {
-                    if let Value::Symbol(s) = e {
-                        exports.push(s.clone());
-                    } else {
-                        return Err(EvalError::malformed("export", "expected identifier"));
+                    match e {
+                        // Bare identifier: external name == internal name.
+                        Value::Symbol(s) => exports.push((s.clone(), s.clone())),
+                        // R7RS §5.6.1 (rename <internal> <external>): export
+                        // the binding named <internal> under the name <external>.
+                        Value::Pair(_) => {
+                            let spec = collect_list(e).map_err(|()| {
+                                EvalError::malformed("export", "malformed export spec")
+                            })?;
+                            match spec.as_slice() {
+                                [
+                                    Value::Symbol(kw),
+                                    Value::Symbol(internal),
+                                    Value::Symbol(external),
+                                ] if kw.name() == "rename" => {
+                                    exports.push((external.clone(), internal.clone()));
+                                }
+                                _ => {
+                                    return Err(EvalError::malformed(
+                                        "export",
+                                        "expected identifier or (rename internal external)",
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(EvalError::malformed("export", "expected identifier"));
+                        }
                     }
                 }
             }
