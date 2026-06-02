@@ -60,3 +60,15 @@ fn srfi_128_comparator_reference_suite() {
     // SRFI 128 reference suite (John Cowan). ~144 assertions.
     assert_suite_clean("srfi-128-test.scm", 140);
 }
+
+#[test]
+fn srfi_151_bitwise_reference_suite() {
+    // SRFI 151 reference suite (John Cowan). ~246 assertions.
+    assert_suite_clean("srfi-151-test.scm", 240);
+}
+
+#[test]
+fn srfi_113_set_reference_suite() {
+    // SRFI 113 reference suite (John Cowan). ~282 assertions.
+    assert_suite_clean("srfi-113-test.scm", 280);
+}

@@ -23,7 +23,7 @@
    test-runner-test-name test-runner-group-path test-runner-group-stack
    test-with-runner
    ;; chibi-compat
-   test test-exit)
+   test test-exit current-test-comparator)
   (import (scheme base) (scheme write) (scheme complex) (scheme inexact))
   (begin
 
@@ -209,10 +209,15 @@
 
     ;; ---- chibi-test compatibility -------------------------------------
     ;; chibi's `(test expected expr)` / `(test name expected expr)`.
+    ;; chibi's `test` compares with a parameterizable predicate
+    ;; (default equal?); suites parameterize it, e.g. to set=?.
+    (define current-test-comparator (make-parameter equal?))
     (define-syntax test
       (syntax-rules ()
-        ((_ name expected expr) (%test-cmp equal? name expected expr))
-        ((_ expected expr)      (%test-cmp equal? expected expr))))
+        ((_ name expected expr)
+         (run-test name (lambda () ((current-test-comparator) expected expr))))
+        ((_ expected expr)
+         (run-test #f (lambda () ((current-test-comparator) expected expr))))))
     (define (test-exit . _)
       (when %current
         (let ((r %current))
