@@ -203,3 +203,19 @@ fn features_lists_implementation_features() {
         "features doesn't contain nscheme: {s}"
     );
 }
+
+#[test]
+fn cond_expand_library_clause_finds_on_disk_library() {
+    // (library (srfi N)) in cond-expand must be true for a library that
+    // exists on the search path but hasn't been loaded yet, not only for
+    // built-ins/already-registered ones. (srfi 69) ships in lib/.
+    let src = "
+        (cond-expand
+          ((library (srfi 69)) 'have-69)
+          (else 'missing))
+    ";
+    assert!(equal(
+        &run(src).unwrap(),
+        &Value::Symbol(Symbol::intern("have-69"))
+    ));
+}

@@ -1734,7 +1734,8 @@ fn eval_feature_req(req: &Value) -> Result<bool, EvalError> {
                     }
                     let name = crate::library::parse_library_name(&parts[1])?;
                     Ok(crate::library::is_builtin_library(&name)
-                        || crate::library::library_exists(&name))
+                        || crate::library::library_exists(&name)
+                        || crate::library::library_findable(&name))
                 }
                 other => Err(EvalError::malformed(
                     "cond-expand",

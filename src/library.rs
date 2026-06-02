@@ -221,6 +221,14 @@ fn find_library_file(name: &LibraryName) -> Option<PathBuf> {
     None
 }
 
+/// Whether `name` could be loaded from the search path (a matching
+/// `.sld`/`.scm` exists), without actually loading it. Used by
+/// `cond-expand`'s `(library …)` test so an as-yet-unloaded on-disk
+/// library counts as available.
+pub fn library_findable(name: &LibraryName) -> bool {
+    find_library_file(name).is_some()
+}
+
 /// Try to load `name` from disk. Returns `Ok(true)` if a file was found
 /// and evaluated (which registers the library via its `define-library`
 /// form), `Ok(false)` if no file exists on the path, or an error if a
