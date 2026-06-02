@@ -28,6 +28,16 @@
 //!        identifier in the def-site env, not the call site's.
 //!        This handles "bound-identifier=?" cases where a user
 //!        shadows `let` or `+` after the macro was defined.
+//!     3. **Per-expansion scope on `SyntaxRef`**: each `SyntaxRef`
+//!        also carries a `scope` unique to the expansion that
+//!        introduced it. Mechanism (1) only renames binders the
+//!        template puts in a *core* binding position; when a
+//!        template-introduced identifier instead becomes a binder
+//!        via a *downstream* macro (the recursive tree-matcher in
+//!        SRFI 146, `stream-let` in SRFI 41), the scope is what keeps
+//!        two expansions' same-named binders apart. The evaluator
+//!        binds and resolves such an identifier under a hygienic
+//!        name derived from `(name, scope)`.
 //! - **`VarKey` (this module's contribution to hygiene)**: pattern
 //!   variables are stored under a key that includes the
 //!   identifier's "scope," not just its name. So when a macro
@@ -88,7 +98,7 @@ impl VarKey {
                 name: s.clone(),
                 scope: None,
             }),
-            Value::SyntaxRef { name, env } => Some(Self {
+            Value::SyntaxRef { name, env, .. } => Some(Self {
                 name: name.clone(),
                 scope: Some(std::rc::Rc::as_ptr(env) as usize),
             }),
@@ -224,12 +234,22 @@ pub fn expand(rules: &SyntaxRules, call: &Value) -> Result<Value, EvalError> {
                 .into_iter()
                 .map(|s| (s.clone(), gensym(&s)))
                 .collect();
+            // One fresh scope for this whole expansion. Every template
+            // identifier this expansion introduces (and wraps in a
+            // SyntaxRef) carries it, so an identifier the template uses
+            // as a binding — even one not caught by collect_binders
+            // because a *downstream* macro turns it into a binder — is
+            // distinct from the same-named identifier of any other
+            // expansion. This is what makes recursive macros like the
+            // SRFI 146 tree-matcher and SRFI 41 stream-of hygienic.
+            let scope = fresh_scope();
             return instantiate(
                 &clause.template,
                 &bindings,
                 &renames,
                 &active_ellipsis,
                 rules.def_env.as_ref(),
+                scope,
             );
         }
     }
@@ -556,8 +576,9 @@ fn instantiate(
     renames: &HashMap<Symbol, Symbol>,
     ellipsis: &Symbol,
     def_env: Option<&EnvRef>,
+    scope: u64,
 ) -> Result<Value, EvalError> {
-    instantiate_inner(template, bindings, renames, ellipsis, def_env, false)
+    instantiate_inner(template, bindings, renames, ellipsis, def_env, scope, false)
 }
 
 /// `escape_ellipsis = true` disables R7RS ellipsis-repetition: any
@@ -569,6 +590,7 @@ fn instantiate_inner(
     renames: &HashMap<Symbol, Symbol>,
     ellipsis: &Symbol,
     def_env: Option<&EnvRef>,
+    scope: u64,
     escape_ellipsis: bool,
 ) -> Result<Value, EvalError> {
     // Identifier (plain Symbol or macro-introduced SyntaxRef):
@@ -588,16 +610,18 @@ fn instantiate_inner(
         if let Some(renamed) = renames.get(s) {
             return Ok(Value::Symbol(renamed.clone()));
         }
-        // Already a SyntaxRef? Preserve its env — that's the env of
-        // the macro that introduced the identifier first. Re-wrapping
-        // with the inner macro's def_env would change which env the
-        // identifier resolves in.
+        // Already a SyntaxRef? Preserve it verbatim — its env *and*
+        // scope are the macro and expansion that introduced the
+        // identifier first. This is what lets an identifier introduced
+        // by an outer macro keep its identity as it flows, as a
+        // pattern-variable value, through inner macro expansions.
         if let Value::SyntaxRef { .. } = template {
             return Ok(template.clone());
         }
         if let Some(env) = def_env {
             return Ok(Value::SyntaxRef {
                 name: s.clone(),
+                scope,
                 env: env.clone(),
             });
         }
@@ -613,7 +637,7 @@ fn instantiate_inner(
                 let (elems, _) = pattern_elems(template);
                 if elems.len() == 2 && is_named_ellipsis(&elems[0], ellipsis) {
                     return instantiate_inner(
-                        &elems[1], bindings, renames, ellipsis, def_env, true,
+                        &elems[1], bindings, renames, ellipsis, def_env, scope, true,
                     );
                 }
             }
@@ -623,6 +647,7 @@ fn instantiate_inner(
                 renames,
                 ellipsis,
                 def_env,
+                scope,
                 escape_ellipsis,
             )
         }
@@ -636,6 +661,7 @@ fn instantiate_list(
     renames: &HashMap<Symbol, Symbol>,
     ellipsis: &Symbol,
     def_env: Option<&EnvRef>,
+    scope: u64,
     escape_ellipsis: bool,
 ) -> Result<Value, EvalError> {
     let (elems, tail) = pattern_elems(template);
@@ -689,6 +715,7 @@ fn instantiate_list(
                     renames,
                     ellipsis,
                     def_env,
+                    scope,
                     false,
                 )?);
             }
@@ -700,13 +727,22 @@ fn instantiate_list(
                 renames,
                 ellipsis,
                 def_env,
+                scope,
                 escape_ellipsis,
             )?);
             i += 1;
         }
     }
     let tail_value = match tail {
-        Some(t) => instantiate_inner(&t, bindings, renames, ellipsis, def_env, escape_ellipsis)?,
+        Some(t) => instantiate_inner(
+            &t,
+            bindings,
+            renames,
+            ellipsis,
+            def_env,
+            scope,
+            escape_ellipsis,
+        )?,
         None => Value::Null,
     };
     // Build the list.
@@ -888,6 +924,7 @@ fn collect_formals(formals: &Value, out: &mut HashSet<Symbol>) {
 
 thread_local! {
     static GENSYM_COUNTER: Cell<u64> = const { Cell::new(0) };
+    static SCOPE_COUNTER: Cell<u64> = const { Cell::new(1) };
 }
 
 fn gensym(base: &Symbol) -> Symbol {
@@ -897,6 +934,16 @@ fn gensym(base: &Symbol) -> Symbol {
         v
     });
     Symbol::intern(&format!("{}#{}", base.name(), n))
+}
+
+/// A fresh scope id, unique to one macro expansion. 0 is reserved to
+/// mean "no scope" (a plain symbol), so the counter starts at 1.
+fn fresh_scope() -> u64 {
+    SCOPE_COUNTER.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        v
+    })
 }
 
 // ---------------------------------------------------------------------

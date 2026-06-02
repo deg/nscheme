@@ -480,18 +480,25 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
             })?;
             return Ok(Step::Return(v));
         }
-        Value::SyntaxRef { name, env: def_env } => {
+        Value::SyntaxRef {
+            name,
+            scope,
+            env: def_env,
+        } => {
             // Macro-introduced reference. R7RS hygiene §4.3.2:
-            //   1. Resolve in the macro's definition-site env first
-            //      (so a user shadowing the macro's referenced
-            //      bindings at the call site doesn't affect us).
-            //   2. If unbound there, the identifier was likely
-            //      introduced by the macro's own template — e.g. a
-            //      `let-syntax`/`let`/`lambda` binding that came in
-            //      with the expansion. Fall back to the call-site
-            //      env.
-            let v = def_env
-                .lookup(name)
+            //   1. The expansion's own hygienic name first: if this
+            //      identifier was bound by *this* expansion (a `let`/
+            //      `lambda`/named-`let` binder the template introduced),
+            //      it lives under `name\u{1}scope` and shadows all else.
+            //   2. The macro's definition-site env, so a free reference
+            //      resolves where the macro was written, not where it
+            //      was called (user shadowing at the call site is
+            //      invisible).
+            //   3. The call-site env by bare name, the last-ditch case
+            //      for identifiers a surrounding `let-syntax` bound.
+            let v = env
+                .lookup(&hygienic_name(name, *scope))
+                .or_else(|| def_env.lookup(name))
                 .or_else(|| env.lookup(name))
                 .ok_or_else(|| {
                     EvalError::Runtime(RuntimeError::Undefined(name.name().to_string()))
@@ -520,7 +527,25 @@ fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, 
     //   (3) the call-site env (so a binding the macro itself
     //       introduced via the template — e.g. through `let-syntax`
     //       — remains visible to template references).
-    if let Value::SyntaxRef { name, env: def_env } = &head {
+    if let Value::SyntaxRef {
+        name,
+        scope,
+        env: def_env,
+    } = &head
+    {
+        // (0) A binding this expansion introduced (its hygienic name):
+        //     e.g. the named-`let` loop variable a template brought in.
+        //     It must be checked first, since such a binding shadows.
+        if let Some(value) = env.lookup(&hygienic_name(name, *scope)) {
+            if let Value::Macro(rules) = value {
+                let args = collect_list(&tail)
+                    .map_err(|()| EvalError::malformed("macro", "argument list must be proper"))?;
+                let call_form = Value::cons(Value::Symbol(name.clone()), Value::list_from(args));
+                let expanded = crate::macros::expand(&rules, &call_form)?;
+                return Ok(Step::Eval(expanded, env));
+            }
+            return step_call(value, tail, env, frames);
+        }
         if let Some(value) = def_env.lookup(name) {
             if let Value::Macro(rules) = value {
                 let args = collect_list(&tail)
@@ -1905,11 +1930,17 @@ fn step_set(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, E
         .as_pair()
         .ok_or_else(|| EvalError::malformed("set!", "expected name and value"))?;
     let (name, target_env) = match head.as_identifier_ref() {
-        Some((s, def_env)) => {
-            // Hygiene: a macro-introduced target name resolves in
-            // the macro's def-site env, not the call site's.
-            let target = def_env.cloned().unwrap_or_else(|| env.clone());
-            (s.clone(), target)
+        Some((s, scope, def_env)) => {
+            // Hygiene: a `set!` on a binding this expansion introduced
+            // targets its hygienic name in the call-site env; otherwise
+            // a macro-introduced free name resolves in the def-site env.
+            let hy = hygienic_name(s, scope);
+            if scope != 0 && env.lookup(&hy).is_some() {
+                (hy, env.clone())
+            } else {
+                let target = def_env.cloned().unwrap_or_else(|| env.clone());
+                (s.clone(), target)
+            }
         }
         None => return Err(EvalError::malformed("set!", "name must be a symbol")),
     };
@@ -2576,16 +2607,30 @@ fn sym(name: &str) -> Value {
 /// binding name, a named-`let` loop name, a lambda formal) as a symbol.
 ///
 /// A binding name can arrive either as a plain `Value::Symbol` or, when
-/// a macro template introduced it, as a `Value::SyntaxRef`. nscheme's
-/// hygiene model resolves a macro-introduced *reference* by its
-/// underlying `name` symbol (see the `SyntaxRef` arm of `eval`), so a
-/// macro-introduced *binding* must bind that same symbol for the two to
-/// meet. This unwraps both forms to that symbol.
+/// a macro template introduced it, as a `Value::SyntaxRef`. A
+/// macro-introduced binding binds the *hygienic* symbol for its
+/// `(name, scope)` — unique to the expansion — so that two expansions
+/// that both introduce `tmp` don't share a binding. References from the
+/// same expansion (also `SyntaxRef`s with that scope) resolve to the
+/// same hygienic symbol; see the `SyntaxRef` arm of `eval`.
 fn binding_symbol(v: &Value) -> Option<Symbol> {
     match v {
         Value::Symbol(s) => Some(s.clone()),
-        Value::SyntaxRef { name, .. } => Some(name.clone()),
+        Value::SyntaxRef { name, scope, .. } => Some(hygienic_name(name, *scope)),
         _ => None,
+    }
+}
+
+/// The symbol a macro-introduced identifier binds and resolves under.
+/// `scope == 0` means "no scope" (a plain symbol passes through
+/// unchanged); otherwise we derive a name that cannot collide with any
+/// user identifier or with a different expansion's same-named binder.
+/// The `\u{1}` separator never appears in reader-produced symbols.
+fn hygienic_name(name: &Symbol, scope: u64) -> Symbol {
+    if scope == 0 {
+        name.clone()
+    } else {
+        Symbol::intern(&format!("{}\u{1}{scope}", name.name()))
     }
 }
 
@@ -3240,27 +3285,28 @@ fn resume(frame: Frame, value: Value, frames: &mut Vec<Frame>) -> Result<Step, E
 /// - `(lambda args ...)`           -> ([], Some(args))
 /// - `(lambda () ...)`             -> ([], None)
 fn parse_formals(form: &Value) -> Result<(Vec<Symbol>, Option<Symbol>), EvalError> {
+    // Formals are binding positions, so a macro-introduced (SyntaxRef)
+    // parameter must bind its *hygienic* name — the same name its
+    // references resolve to — not its bare name (`binding_symbol`).
     match form {
         Value::Null => Ok((Vec::new(), None)),
-        v if v.as_identifier().is_some() => {
-            Ok((Vec::new(), Some(v.as_identifier().unwrap().clone())))
-        }
+        v if binding_symbol(v).is_some() => Ok((Vec::new(), binding_symbol(v))),
         Value::Pair(_) => {
             let mut positional = Vec::new();
             let mut cur = form.clone();
             loop {
                 match cur {
                     Value::Null => return Ok((positional, None)),
-                    v if v.as_identifier().is_some() => {
-                        return Ok((positional, Some(v.as_identifier().unwrap().clone())));
+                    ref v if binding_symbol(v).is_some() => {
+                        return Ok((positional, binding_symbol(v)));
                     }
                     Value::Pair(p) => {
                         let pair = p.borrow();
                         let head = pair.car.clone();
                         let tail = pair.cdr.clone();
                         drop(pair);
-                        if let Some(s) = head.as_identifier() {
-                            positional.push(s.clone());
+                        if let Some(s) = binding_symbol(&head) {
+                            positional.push(s);
                         } else {
                             return Err(EvalError::malformed(
                                 "lambda",

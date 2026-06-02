@@ -612,11 +612,18 @@ pub enum Value {
     Symbol(Symbol),
     /// A macro-introduced identifier reference (R7RS hygiene
     /// §4.3.2): like `Symbol(name)` but carries the definition-site
-    /// environment so the evaluator can resolve it there. Produced
-    /// only by the `syntax-rules` expander when wrapping free
-    /// identifiers in a template; user code never constructs one
-    /// directly.
-    SyntaxRef { name: Symbol, env: EnvRef },
+    /// environment so the evaluator can resolve it there, plus a
+    /// `scope` that is unique to the macro *expansion* that introduced
+    /// it. The scope makes a template-introduced binding identifier
+    /// distinct across separate (including recursive) expansions of the
+    /// same macro, so two expansions that both introduce `tmp` don't
+    /// collide. Produced only by the `syntax-rules` expander; user code
+    /// never constructs one directly.
+    SyntaxRef {
+        name: Symbol,
+        scope: u64,
+        env: EnvRef,
+    },
     /// An exact fixnum (fast path for small integers).
     Int(i64),
     /// An exact arbitrary-precision integer. Only used when a result
@@ -852,10 +859,10 @@ impl Value {
     /// identifier originated when it's a `SyntaxRef`. Use this in
     /// variable-reference and `set!` positions where hygiene
     /// dictates that the binding lives in the macro's def-site env.
-    pub fn as_identifier_ref(&self) -> Option<(&Symbol, Option<&EnvRef>)> {
+    pub fn as_identifier_ref(&self) -> Option<(&Symbol, u64, Option<&EnvRef>)> {
         match self {
-            Self::Symbol(s) => Some((s, None)),
-            Self::SyntaxRef { name, env } => Some((name, Some(env))),
+            Self::Symbol(s) => Some((s, 0, None)),
+            Self::SyntaxRef { name, scope, env } => Some((name, *scope, Some(env))),
             _ => None,
         }
     }

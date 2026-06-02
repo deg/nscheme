@@ -216,9 +216,6 @@ fn stream_of_comprehension() {
              (y is (* x x))))",
         "'(7 15 31)",
     );
-    // A cartesian comprehension with two `in` generators currently
-    // raises `stream-cdr null` under nscheme's stream laziness; tracked
-    // as nscheme-lul.12.1. Single-generator and `is` clauses work.
     assert_equal(
         "(stream->list
            (stream-of (* x x)
@@ -229,11 +226,12 @@ fn stream_of_comprehension() {
 }
 
 #[test]
-#[ignore = "cartesian stream-of (multiple in-generators) raises stream-cdr null; nscheme-lul.12.1"]
-fn stream_of_cartesian_comprehension_is_broken() {
-    // Two `in` generators should yield the cartesian product. Under
-    // nscheme's stream laziness this raises "stream-cdr null stream".
-    // Tracked as nscheme-lul.12.1.
+fn stream_of_cartesian_comprehension() {
+    // Two `in` generators yield the cartesian product. This used to
+    // crash ("stream-cdr null"): nested stream-let loops reused the
+    // identifiers loop/strm, which nscheme's macro hygiene mis-handled.
+    // Fixed by scope-based hygiene (nscheme-d6o). Guard for
+    // nscheme-lul.12.1.
     assert_equal(
         "(stream->list
            (stream-of (* x y)

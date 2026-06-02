@@ -8,12 +8,6 @@
 ;;; `include` relative to the process directory, so both bodies are inlined
 ;;; here inside `begin` blocks instead.
 ;;;
-;;; KNOWN LIMITATION: deleting the *minimum* key (mapping-delete /
-;;; mapping-delete-all on the smallest key) currently raises "tree does
-;;; not match any pattern" — min+delete recurses into the empty-tree
-;;; sentinel, which the (node …) pattern (requiring a truthy item) does
-;;; not match. All other operations work. Tracked as nscheme-oeg.6.1.
-;;;
 ;;; Upstream also imports three small SRFIs nscheme does not ship as
 ;;; built-ins or vendored libraries:
 ;;;   (srfi 2)   — `and-let*`  (used pervasively by the rbtree macro engine)
