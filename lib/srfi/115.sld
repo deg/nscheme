@@ -64,6 +64,9 @@
    (else
     (import (scheme base) (scheme char) (srfi 1) (srfi 14))
     (begin
+      ;; nscheme/chibi-compat shims: SRFI 14 char-sets are already
+      ;; immutable, so immutable-char-set is identity.
+      (define (immutable-char-set cs) cs)
       (define %char-set:letter
         (char-set-intersection char-set:ascii char-set:letter))
       (define %char-set:lower-case
