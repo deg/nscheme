@@ -92,6 +92,12 @@ fn srfi_127_lseq_reference_suite() {
 }
 
 #[test]
+fn srfi_115_regex_reference_suite() {
+    // SRFI 115 reference suite (Alex Shinn). ~66 assertions.
+    assert_suite_clean("srfi-115-test.scm", 60);
+}
+
+#[test]
 fn srfi_14_charset_reference_suite() {
     // SRFI 14 reference suite (Olin Shivers). Its own `test` macro
     // raises on the first failed form, so running to completion without
