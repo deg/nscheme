@@ -848,6 +848,12 @@ fn import_one(lib_form: &Value, target: &EnvRef) -> Result<(), EvalError> {
         // Bindings already installed by install_base.
         return Ok(());
     }
+    // Not built-in and not yet registered: try loading it from the
+    // filesystem search path (bead nscheme-9q5). A successful load
+    // registers the library so library_bindings below finds it.
+    if crate::library::library_bindings(&lib_name).is_none() {
+        crate::library::try_load_library(&lib_name)?;
+    }
     let bindings = crate::library::library_bindings(&lib_name).ok_or_else(|| {
         EvalError::malformed(
             "import",

@@ -36,8 +36,9 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use crate::env::Cell;
+use crate::env::{Cell, Env, EnvRef};
 use crate::eval::EvalError;
 use crate::value::{Symbol, Value};
 
@@ -137,6 +138,111 @@ pub fn library_bindings(name: &LibraryName) -> Option<HashMap<Symbol, Cell>> {
     // Cloning the map clones the `Rc` cell handles, not the values, so
     // importers receive shared cells.
     LIBRARIES.with(|r| r.borrow().get(name).cloned())
+}
+
+// ---------------------------------------------------------------------
+// Filesystem loader (bead nscheme-9q5)
+//
+// When `import` names a library that is neither built-in nor already
+// registered, we search a load path for a matching source file, load
+// it (which runs its `define-library` form and registers it), then
+// retry. This is what lets nscheme adopt R7RS-large reference
+// libraries from disk instead of pasting them into the program.
+// ---------------------------------------------------------------------
+
+thread_local! {
+    /// Hermetic root environment for loading library files. It has the
+    /// base library installed so a loaded `(define-library …)` body can
+    /// resolve `cons`, `define-record-type`, `syntax-rules`, etc. up
+    /// the parent chain. Built lazily and reused: loads are cached by
+    /// the registry, but a few libraries may load before the cache
+    /// fills, and they all share this root. Kept separate from any
+    /// program env so libraries can't see the importer's local defines.
+    static LOADER_ROOT: RefCell<Option<EnvRef>> = const { RefCell::new(None) };
+
+    /// Test/embedding hook: when set, fully replaces the search path.
+    /// Thread-local, so tests running in parallel don't interfere and
+    /// no `unsafe` env mutation is needed. See [`set_search_path`].
+    static SEARCH_PATH_OVERRIDE: RefCell<Option<Vec<PathBuf>>> = const { RefCell::new(None) };
+}
+
+/// Replace the library search path for the current thread. Primarily
+/// for tests and embedders that ship libraries in a known location;
+/// when set, it takes precedence over `NSCHEME_LIB_PATH` and the
+/// compiled-in defaults. Pass an empty vector to disable all lookup.
+pub fn set_search_path(dirs: Vec<PathBuf>) {
+    SEARCH_PATH_OVERRIDE.with(|s| *s.borrow_mut() = Some(dirs));
+}
+
+/// The directories searched for library files. If [`set_search_path`]
+/// installed an override for this thread, that is used verbatim.
+/// Otherwise, in order:
+/// 1. `NSCHEME_LIB_PATH` (colon-separated), if set;
+/// 2. a compiled-in default (`<crate>/lib`, baked at build time);
+/// 3. `./lib` relative to the current directory.
+fn library_search_path() -> Vec<PathBuf> {
+    if let Some(dirs) = SEARCH_PATH_OVERRIDE.with(|s| s.borrow().clone()) {
+        return dirs;
+    }
+    let mut dirs = Vec::new();
+    if let Ok(path) = std::env::var("NSCHEME_LIB_PATH") {
+        for entry in path.split(':') {
+            if !entry.is_empty() {
+                dirs.push(PathBuf::from(entry));
+            }
+        }
+    }
+    dirs.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/lib")));
+    dirs.push(PathBuf::from("./lib"));
+    dirs
+}
+
+/// Locate the source file for `name` on the search path. A name like
+/// `(scheme list)` maps to the relative path `scheme/list`, tried with
+/// `.sld` then `.scm`. Returns the first existing file.
+fn find_library_file(name: &LibraryName) -> Option<PathBuf> {
+    let rel: PathBuf = name.iter().collect();
+    for dir in library_search_path() {
+        for ext in ["sld", "scm"] {
+            let candidate = dir.join(&rel).with_extension(ext);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Try to load `name` from disk. Returns `Ok(true)` if a file was found
+/// and evaluated (which registers the library via its `define-library`
+/// form), `Ok(false)` if no file exists on the path, or an error if a
+/// file was found but failed to read or evaluate.
+pub fn try_load_library(name: &LibraryName) -> Result<bool, EvalError> {
+    // Already registered (e.g. a diamond import resolved earlier) —
+    // nothing to do. This also makes the DAG of inter-library imports
+    // terminate without a separate cycle guard for the common case.
+    if library_exists(name) {
+        return Ok(true);
+    }
+    let Some(path) = find_library_file(name) else {
+        return Ok(false);
+    };
+    let source = std::fs::read_to_string(&path)
+        .map_err(|e| malformed(&format!("reading library ({}): {e}", name.join(" "))))?;
+    let root = LOADER_ROOT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            let env = Env::new_global();
+            crate::builtins::install_base(&env)?;
+            *slot = Some(env);
+        }
+        Ok::<EnvRef, EvalError>(slot.as_ref().unwrap().clone())
+    })?;
+    crate::eval::eval_source(&source, root)?;
+    // The file should have registered the library. If it named a
+    // different library than the one we were asked for, this is false
+    // and the caller reports "unknown library".
+    Ok(library_exists(name))
 }
 
 fn collect_list(v: &Value) -> Option<Vec<Value>> {
