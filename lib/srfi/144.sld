@@ -476,23 +476,15 @@
 
 ;; Implementation Constants
 
-(define fl-greatest
-  (let loop ((x (- (expt 2.0 precision-bits) 1.0)))
-    (if (finite? (* 2.0 x))
-        (loop (* 2.0 x))
-        x)))
-
-(define fl-least
-  (let loop ((x 1.0))
-    (if (> (/ x 2.0) 0.0)
-        (loop (/ x 2.0))
-        x)))
-
-(define fl-epsilon
-  (let loop ((eps 1.0))
-    (if (= 1.0 (+ 1.0 eps))
-        (* 2.0 eps)
-        (loop (/ eps 2.0)))))
+;; Upstream computes these three by load-time loops (doubling /
+;; halving until overflow / underflow). Under the tree-walking
+;; interpreter that costs ~18s per load, so they are inlined as the
+;; exact IEEE-754 double values the loops converge to: the largest
+;; finite double, the smallest positive subnormal, and machine epsilon
+;; (bead nscheme-oeg.3.1).
+(define fl-greatest 1.7976931348623157e308)
+(define fl-least 5e-324)
+(define fl-epsilon 2.220446049250313e-16)
 
 (define fl-integer-exponent-zero                ; arbitrary
   (exact (- (log fl-least 2.0) 1.0)))
@@ -984,18 +976,19 @@
 
 ;;; If x >= flgamma:upper-cutoff, then (Gamma x) is +inf.0
 
-(define flgamma:upper-cutoff
-  (do ((x 2.0 (+ x 1.0)))
-      ((flinfinite? (Gamma x))
-       x)))
+;; Upstream finds these two cutoffs by iterating the (expensive) Gamma
+;; ~350 times at load: the smallest x>=2 where Gamma overflows to +inf,
+;; and the negative x past which Gamma underflows to 0. Under the
+;; tree-walking interpreter that scan costs ~18s, so the deterministic
+;; results are inlined as literals (bead nscheme-oeg.3.1). The original
+;; do-loops are kept commented for provenance.
+;;   (do ((x 2.0 (+ x 1.0)))  ((flinfinite? (Gamma x)) x))            => 172.0
+;;   (do ((x -2.0 (- x 1.0))) ((flzero? (Gamma (fladjacent x 0.0))) x)) => -184.0
+(define flgamma:upper-cutoff 172.0)
 
 ;;; If x <= flgamma:lower-cutoff, then (Gamma x) is a zero or NaN
 
-(define flgamma:lower-cutoff
-  (do ((x -2.0 (- x 1.0)))
-      ((flzero?
-        (Gamma (fladjacent x 0.0)))
-       x)))
+(define flgamma:lower-cutoff -184.0)
 
 ;;; log (Gamma (x))
 
