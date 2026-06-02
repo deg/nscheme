@@ -90,3 +90,19 @@ fn srfi_127_lseq_reference_suite() {
     // SRFI 127 reference suite (John Cowan). ~109 assertions.
     assert_suite_clean("srfi-127-test.scm", 100);
 }
+
+#[test]
+fn srfi_14_charset_reference_suite() {
+    // SRFI 14 reference suite (Olin Shivers). Its own `test` macro
+    // raises on the first failed form, so running to completion without
+    // error means every assertion passed. ~140 assertions.
+    set_search_path(vec![lib_dir()]);
+    let path = PathBuf::from(format!(
+        "{}/tests/r7rs-large-corpus/srfi-14-test.scm",
+        env!("CARGO_MANIFEST_DIR")
+    ));
+    let src = std::fs::read_to_string(&path).expect("read suite");
+    let env = Env::new_global();
+    install_base(&env).expect("install_base");
+    eval_source(&src, env).expect("SRFI 14 reference suite must run with no failed assertion");
+}
