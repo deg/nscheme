@@ -72,3 +72,21 @@ fn srfi_113_set_reference_suite() {
     // SRFI 113 reference suite (John Cowan). ~282 assertions.
     assert_suite_clean("srfi-113-test.scm", 280);
 }
+
+#[test]
+fn srfi_143_fixnum_reference_suite() {
+    // SRFI 143 reference suite (John Cowan). ~141 assertions.
+    assert_suite_clean("srfi-143-test.scm", 140);
+}
+
+#[test]
+fn srfi_117_list_queue_reference_suite() {
+    // SRFI 117 reference suite (Alex Shinn). ~34 assertions.
+    assert_suite_clean("srfi-117-test.scm", 30);
+}
+
+#[test]
+fn srfi_127_lseq_reference_suite() {
+    // SRFI 127 reference suite (John Cowan). ~109 assertions.
+    assert_suite_clean("srfi-127-test.scm", 100);
+}
