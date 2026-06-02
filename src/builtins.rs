@@ -3032,12 +3032,41 @@ const BOOTSTRAP: &str = r"
                    (map (lambda (x) (string-ref x i)) rest))
             (loop (+ i 1)))))))
 
+;; The c..r compositions (R7RS 6.4). The two-level forms are in
+;; (scheme base); the three- and four-level forms are (scheme cxr).
+;; nscheme installs them all in the global env, so both libraries are
+;; satisfied. Each is built from the next-shorter forms, so the whole
+;; family is correct by construction.
 (define (caar p) (car (car p)))
 (define (cadr p) (car (cdr p)))
 (define (cdar p) (cdr (car p)))
 (define (cddr p) (cdr (cdr p)))
-(define (caddr p) (car (cdr (cdr p))))
-(define (cadddr p) (car (cdr (cdr (cdr p)))))
+;; three-level: (cL1L2L3r p) = (cL1L2r (cL3r p))
+(define (caaar p) (caar (car p)))
+(define (caadr p) (caar (cdr p)))
+(define (cadar p) (cadr (car p)))
+(define (caddr p) (cadr (cdr p)))
+(define (cdaar p) (cdar (car p)))
+(define (cdadr p) (cdar (cdr p)))
+(define (cddar p) (cddr (car p)))
+(define (cdddr p) (cddr (cdr p)))
+;; four-level: (cL1L2L3L4r p) = (cL1L2r (cL3L4r p))
+(define (caaaar p) (caar (caar p)))
+(define (caaadr p) (caar (cadr p)))
+(define (caadar p) (caar (cdar p)))
+(define (caaddr p) (caar (cddr p)))
+(define (cadaar p) (cadr (caar p)))
+(define (cadadr p) (cadr (cadr p)))
+(define (caddar p) (cadr (cdar p)))
+(define (cadddr p) (cadr (cddr p)))
+(define (cdaaar p) (cdar (caar p)))
+(define (cdaadr p) (cdar (cadr p)))
+(define (cdadar p) (cdar (cdar p)))
+(define (cdaddr p) (cdar (cddr p)))
+(define (cddaar p) (cddr (caar p)))
+(define (cddadr p) (cddr (cadr p)))
+(define (cdddar p) (cddr (cdar p)))
+(define (cddddr p) (cddr (cddr p)))
 
 ;; dynamic-wind is implemented as a Rust special form (see
 ;; step_dynamic_wind in eval.rs) so its `before` / `after` thunks
