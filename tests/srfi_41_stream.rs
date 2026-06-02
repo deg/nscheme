@@ -229,6 +229,21 @@ fn stream_of_comprehension() {
 }
 
 #[test]
+#[ignore = "cartesian stream-of (multiple in-generators) raises stream-cdr null; nscheme-lul.12.1"]
+fn stream_of_cartesian_comprehension_is_broken() {
+    // Two `in` generators should yield the cartesian product. Under
+    // nscheme's stream laziness this raises "stream-cdr null stream".
+    // Tracked as nscheme-lul.12.1.
+    assert_equal(
+        "(stream->list
+           (stream-of (* x y)
+             (x in (stream-range 1 4))
+             (y in (stream-range 1 5))))",
+        "'(1 2 3 4 2 4 6 8 3 6 9 12)",
+    );
+}
+
+#[test]
 fn unfold_and_unfolds() {
     assert_equal(
         "(stream->list (stream-unfold (lambda (x) (* x x)) (lambda (x) (< x 10)) (lambda (x) (+ x 1)) 0))",
