@@ -43,9 +43,22 @@ use crate::value::{RuntimeError, Symbol, Value};
 /// A shared, reference-counted handle to an environment.
 pub type EnvRef = Rc<Env>;
 
+/// A single mutable binding location.
+///
+/// Each name in a frame maps to a `Cell` rather than directly to a
+/// `Value`. The extra indirection buys one thing: two frames can hold
+/// the *same* cell, so a `set!` through one is visible through the
+/// other. That is exactly what library `import` needs — the importer
+/// and the library must share the binding, not each get a private copy
+/// (see bead `nscheme-q1c`). For ordinary `define`/`set!`/`lookup`
+/// within a single scope chain the cell is invisible; it only matters
+/// when [`Env::bind_cell`] deliberately aliases a name to an existing
+/// cell.
+pub type Cell = Rc<RefCell<Value>>;
+
 /// One lexical scope: a frame plus an optional parent.
 pub struct Env {
-    frame: RefCell<HashMap<Symbol, Value>>,
+    frame: RefCell<HashMap<Symbol, Cell>>,
     parent: Option<EnvRef>,
 }
 
@@ -81,30 +94,60 @@ impl Env {
     /// Bind `name` to `value` in *this* frame, replacing any existing
     /// binding in this frame. Bindings in ancestor frames are not
     /// affected.
+    ///
+    /// `define` always installs a *fresh* cell, so redefining a name
+    /// that was previously aliased into this frame (via
+    /// [`bind_cell`](Self::bind_cell)) breaks the alias rather than
+    /// mutating the shared binding — matching R7RS, where `define`
+    /// introduces a binding and `set!` mutates one.
     pub fn define(&self, name: Symbol, value: Value) {
-        self.frame.borrow_mut().insert(name, value);
+        self.frame
+            .borrow_mut()
+            .insert(name, Rc::new(RefCell::new(value)));
     }
 
     /// Look up `name`. Walks the parent chain. Returns `None` if no
     /// frame contains the binding.
     pub fn lookup(&self, name: &Symbol) -> Option<Value> {
-        if let Some(v) = self.frame.borrow().get(name) {
-            return Some(v.clone());
+        if let Some(cell) = self.frame.borrow().get(name) {
+            return Some(cell.borrow().clone());
         }
         self.parent.as_ref().and_then(|p| p.lookup(name))
     }
 
     /// Mutate the nearest enclosing binding of `name`. Returns an
     /// `Undefined` error if no enclosing frame contains the binding.
+    ///
+    /// The mutation writes *into the cell*, so any other frame holding
+    /// the same cell (an imported library binding) observes it too.
     pub fn set(&self, name: &Symbol, value: Value) -> Result<(), RuntimeError> {
-        if self.frame.borrow().contains_key(name) {
-            self.frame.borrow_mut().insert(name.clone(), value);
+        if let Some(cell) = self.frame.borrow().get(name) {
+            *cell.borrow_mut() = value;
             return Ok(());
         }
         if let Some(parent) = &self.parent {
             return parent.set(name, value);
         }
         Err(RuntimeError::Undefined(name.name().to_string()))
+    }
+
+    /// Return the cell backing `name`, walking the parent chain. This
+    /// is how `define-library` captures a binding for export: the
+    /// registry stores the cell itself, so importers share it rather
+    /// than copying its value. Returns `None` if unbound.
+    pub fn cell(&self, name: &Symbol) -> Option<Cell> {
+        if let Some(cell) = self.frame.borrow().get(name) {
+            return Some(cell.clone());
+        }
+        self.parent.as_ref().and_then(|p| p.cell(name))
+    }
+
+    /// Alias `name` in *this* frame to an existing `cell`. After this,
+    /// `lookup`/`set!` of `name` in this scope read and write the same
+    /// location the cell came from. Used by `import` to share a
+    /// library's mutable bindings with the importer.
+    pub fn bind_cell(&self, name: Symbol, cell: Cell) {
+        self.frame.borrow_mut().insert(name, cell);
     }
 
     /// Number of bindings in this frame (does not count ancestors).

@@ -69,6 +69,68 @@ fn library_does_not_leak_non_exported_bindings() {
 }
 
 #[test]
+fn imported_binding_shares_cell_library_mutation_visible() {
+    // A library mutator (`bump!`) runs *after* import; the importer,
+    // reading the exported `counter`, must see the new value. This is
+    // the core of bead nscheme-q1c: import shares the cell, not a copy.
+    let src = "
+        (define-library (test counter)
+          (export counter bump!)
+          (begin
+            (define counter 0)
+            (define (bump!) (set! counter (+ counter 1)))))
+        (import (test counter))
+        (bump!)
+        (bump!)
+        counter
+    ";
+    assert!(equal(&run(src).unwrap(), &Value::Int(2)));
+}
+
+#[test]
+fn imported_binding_shares_cell_importer_mutation_visible() {
+    // The reverse direction: a `set!` in the importer's scope must be
+    // visible to the library's own procedures, because they read the
+    // same shared cell.
+    let src = "
+        (define-library (test reg)
+          (export slot read-slot)
+          (begin
+            (define slot 'empty)
+            (define (read-slot) slot)))
+        (import (test reg))
+        (set! slot 'filled)
+        (read-slot)
+    ";
+    assert!(equal(
+        &run(src).unwrap(),
+        &Value::Symbol(Symbol::intern("filled"))
+    ));
+}
+
+#[test]
+fn redefining_imported_name_breaks_the_alias() {
+    // `define` introduces a fresh binding rather than mutating the
+    // shared cell, so redefining an imported name in the importer does
+    // NOT write back to the library.
+    let src = "
+        (define-library (test reg2)
+          (export slot read-slot)
+          (begin
+            (define slot 'orig)
+            (define (read-slot) slot)))
+        (import (test reg2))
+        (define slot 'shadow)
+        (read-slot)
+    ";
+    // The library still sees its own binding, untouched by the redefine.
+    assert!(equal(
+        &run(src).unwrap(),
+        &Value::Symbol(Symbol::intern("orig"))
+    ));
+}
+
+#[test]
 fn cond_expand_picks_matching_branch() {
     let src = "
         (cond-expand

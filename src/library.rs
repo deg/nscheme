@@ -25,16 +25,19 @@
 //!   `step_cond_expand` are in there.
 //! - R7RS §5.6.
 //!
-//! ## A known gap
+//! ## Mutable bindings are shared, not copied
 //!
-//! Import copies *values*, not shared cells. Mutations to an
-//! imported binding don't propagate back to the library; mutations
-//! in the library after import don't propagate to importers. See
-//! the open bead `nscheme-q1c`.
+//! A library's exports are stored as the *cells* that back them (see
+//! [`crate::env::Cell`]), so `import` aliases the importer's name to
+//! the same location. A `set!` in the library is visible to importers
+//! and vice versa — the semantics R7RS expects for libraries that
+//! expose mutable state (counters, registries, on-load hooks). This
+//! resolved the former value-copy gap (bead `nscheme-q1c`).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use crate::env::Cell;
 use crate::eval::EvalError;
 use crate::value::{Symbol, Value};
 
@@ -46,7 +49,7 @@ thread_local! {
     /// Registry of user-defined libraries by name. The implementation-
     /// supplied libraries (`(scheme base)` etc.) are NOT stored here
     /// because their bindings are already installed in the global env.
-    static LIBRARIES: RefCell<HashMap<LibraryName, HashMap<Symbol, Value>>> =
+    static LIBRARIES: RefCell<HashMap<LibraryName, HashMap<Symbol, Cell>>> =
         RefCell::new(HashMap::new());
 }
 
@@ -126,11 +129,13 @@ pub fn library_exists(name: &LibraryName) -> bool {
 }
 
 #[allow(clippy::implicit_hasher)]
-pub fn register_library(name: LibraryName, bindings: HashMap<Symbol, Value>) {
+pub fn register_library(name: LibraryName, bindings: HashMap<Symbol, Cell>) {
     LIBRARIES.with(|r| r.borrow_mut().insert(name, bindings));
 }
 
-pub fn library_bindings(name: &LibraryName) -> Option<HashMap<Symbol, Value>> {
+pub fn library_bindings(name: &LibraryName) -> Option<HashMap<Symbol, Cell>> {
+    // Cloning the map clones the `Rc` cell handles, not the values, so
+    // importers receive shared cells.
     LIBRARIES.with(|r| r.borrow().get(name).cloned())
 }
 

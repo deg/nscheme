@@ -753,13 +753,16 @@ fn step_define_library(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
     let lib_env = crate::env::Env::extend(env.clone());
     let mut exports: Vec<Symbol> = Vec::new();
     process_library_decls(&decls, &lib_env, &mut exports)?;
-    // Collect exported bindings into a registry entry.
-    let mut bindings: HashMap<Symbol, Value> = HashMap::new();
+    // Collect exported bindings into a registry entry. We store the
+    // *cells*, not their current values, so importers share the
+    // library's mutable bindings rather than copying them (bead
+    // nscheme-q1c).
+    let mut bindings: HashMap<Symbol, crate::env::Cell> = HashMap::new();
     for name in exports {
-        let v = lib_env.lookup(&name).ok_or_else(|| {
+        let cell = lib_env.cell(&name).ok_or_else(|| {
             EvalError::malformed("define-library", "exported name was not defined")
         })?;
-        bindings.insert(name, v);
+        bindings.insert(name, cell);
     }
     crate::library::register_library(lib_name, bindings);
     Ok(Step::Return(Value::Unspecified))
@@ -851,8 +854,8 @@ fn import_one(lib_form: &Value, target: &EnvRef) -> Result<(), EvalError> {
             format!("unknown library: ({})", lib_name.join(" ")),
         )
     })?;
-    for (name, value) in bindings {
-        target.define(name, value);
+    for (name, cell) in bindings {
+        target.bind_cell(name, cell);
     }
     Ok(())
 }
