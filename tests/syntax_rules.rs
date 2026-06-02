@@ -175,3 +175,24 @@ fn macro_template_introduces_named_let_binding() {
     ";
     assert!(equal(&run(src).unwrap(), &Value::Int(15)));
 }
+
+#[test]
+fn dotted_tail_variable_under_ellipsis() {
+    // A pattern variable captured in dotted-tail position `(head . tail)`
+    // inside an ellipsis pattern must be registered as a repeated
+    // variable, so the template's `tail ...` iterates it. Regression for
+    // the SRFI 146 red-black-tree macro engine (collect_pattern_vars was
+    // skipping the improper tail).
+    let src = "
+        (define-syntax tails
+          (syntax-rules ()
+            ((_ (head . tail) ...) (list (quote tail) ...))))
+        (tails (a 1 2) (b 3 4 5) (c))
+    ";
+    let expected = Value::list_from([
+        Value::list_from([Value::Int(1), Value::Int(2)]),
+        Value::list_from([Value::Int(3), Value::Int(4), Value::Int(5)]),
+        Value::Null,
+    ]);
+    assert!(equal(&run(src).unwrap(), &expected));
+}

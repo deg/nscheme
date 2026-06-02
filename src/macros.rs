@@ -521,6 +521,14 @@ fn collect_pattern_vars_into(
             collect_pattern_vars_into(&pair.car, literals, ellipsis, out);
             cur = pair.cdr.clone();
         }
+        // The final cdr of an improper pattern — e.g. `r` in `(p . r)`
+        // — is itself a pattern position and can bind a variable. Without
+        // this, a dotted-tail variable captured under an ellipsis
+        // (`(p . r) ...`) is matched but never registered as a repeated
+        // variable, so the template's `r ...` expands to nothing.
+        if !matches!(cur, Value::Null) {
+            collect_pattern_vars_into(&cur, literals, ellipsis, out);
+        }
     }
 }
 
