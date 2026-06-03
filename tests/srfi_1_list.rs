@@ -152,3 +152,80 @@ fn misc_and_sets() {
                 (if (every (lambda (x) (memv x u)) '(a b c d e i o u)) #t #f)))",
     );
 }
+
+// --- additional coverage for procedure families beyond the worked
+// --- examples (SRFI 1 ships no upstream test suite). ---
+
+#[test]
+fn unfold_and_tabulate() {
+    assert_true(
+        "(equal? (unfold (lambda (x) (> x 5)) (lambda (x) (* x x)) (lambda (x) (+ x 1)) 1)
+                         '(1 4 9 16 25))",
+    );
+    assert_true(
+        "(equal? (unfold-right zero? (lambda (x) (* x x)) (lambda (x) (- x 1)) 5)
+                         '(1 4 9 16 25))",
+    );
+    assert_true("(equal? (list-tabulate 5 (lambda (i) (* i i))) '(0 1 4 9 16))");
+}
+
+#[test]
+fn span_break_partition_tails() {
+    assert_true(
+        "(equal? (call-with-values (lambda () (span even? '(2 4 6 1 3))) list)
+                         '((2 4 6) (1 3)))",
+    );
+    assert_true(
+        "(equal? (call-with-values (lambda () (break even? '(1 3 2 4))) list)
+                         '((1 3) (2 4)))",
+    );
+    assert_true("(equal? (find-tail even? '(1 3 5 6 7)) '(6 7))");
+    assert_true("(eq? (find-tail even? '(1 3 5)) #f)");
+    assert_true("(equal? (take-while odd? '(1 3 5 2 4)) '(1 3 5))");
+    assert_true("(equal? (drop-while odd? '(1 3 5 2 4)) '(2 4))");
+}
+
+#[test]
+fn selectors_and_misc() {
+    assert_true("(eq? 'd (fourth '(a b c d e)))");
+    assert_true("(eq? 'e (fifth '(a b c d e)))");
+    assert_true(
+        "(call-with-values (lambda () (car+cdr '(1 2 3)))
+                   (lambda (a d) (and (= a 1) (equal? d '(2 3)))))",
+    );
+    assert_true("(= 5 (length+ '(1 2 3 4 5)))");
+    assert_true("(eq? #f (length+ (circular-list 1 2 3)))");
+    assert_true("(equal? (concatenate '((1 2) (3) (4 5))) '(1 2 3 4 5))");
+    assert_true("(equal? (append-reverse '(3 2 1) '(4 5)) '(1 2 3 4 5))");
+}
+
+#[test]
+fn deletion_and_remove() {
+    assert_true("(equal? (remove even? '(1 2 3 4 5)) '(1 3 5))");
+    assert_true("(equal? (delete 3 '(1 2 3 4 3 5)) '(1 2 4 5))");
+    assert_true("(equal? (delete-duplicates '(1 2 1 3 2 4)) '(1 2 3 4))");
+    assert_true("(equal? (filter-map (lambda (x) (and (even? x) (* x x))) '(1 2 3 4)) '(4 16))");
+}
+
+#[test]
+fn alist_and_set_operations() {
+    assert_true("(equal? (assq 'b '((a . 1) (b . 2) (c . 3))) '(b . 2))");
+    assert_true("(equal? (alist-copy '((a . 1) (b . 2))) '((a . 1) (b . 2)))");
+    assert_true("(equal? (alist-delete 'b '((a . 1) (b . 2) (c . 3))) '((a . 1) (c . 3)))");
+    assert_true("(if (lset<= eqv? '(1 2) '(1 2 3)) #t #f)");
+    assert_true("(equal? (lset-adjoin eqv? '(1 2 3) 2 4) '(4 1 2 3))");
+    assert_true(
+        "(let ((d (lset-difference eqv? '(1 2 3 4 5) '(2 4))))
+                   (and (= 3 (length d)) (if (every (lambda (x) (memv x d)) '(1 3 5)) #t #f)))",
+    );
+}
+
+#[test]
+fn folds_and_reductions() {
+    assert_true("(= 15 (fold + 0 '(1 2 3 4 5)))");
+    assert_true("(equal? (fold cons '() '(1 2 3)) '(3 2 1))");
+    assert_true("(equal? (fold-right cons '() '(1 2 3)) '(1 2 3))");
+    assert_true("(= 120 (reduce * 1 '(1 2 3 4 5)))");
+    assert_true("(= 3 (count even? '(1 2 3 4 5 6)))");
+    assert_true("(equal? (append-map (lambda (x) (list x x)) '(1 2)) '(1 1 2 2))");
+}
