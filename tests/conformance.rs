@@ -99,6 +99,12 @@ fn srfi_146_mapping_reference_suite() {
 }
 
 #[test]
+fn srfi_146_hash_mapping_reference_suite() {
+    // SRFI 146 hash (hashmaps) reference suite. ~77 assertions.
+    assert_suite_clean("srfi-146-hash-test.scm", 70);
+}
+
+#[test]
 fn srfi_125_hash_table_reference_suite() {
     // SRFI 125 reference suite (William D Clinger). It keeps its own
     // pass/fail state in `ultimate-exit-status` (0 = all passed) rather
