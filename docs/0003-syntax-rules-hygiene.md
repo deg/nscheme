@@ -1,14 +1,16 @@
 # ADR 0003 — Hygienic `syntax-rules` via alpha-renaming
 
-**Status:** Accepted (2026-05-21); hygiene reworked to scope-based, see note **Bead:** [nscheme-2p2](../.beads/issues.jsonl) **Related:** [0001 — Tree-walking interpreter](0001-tree-walking-interpreter.md)
+**Status:** Superseded in part by [0008](0008-hygiene-scope-and-syntaxref.md), see note **Bead:** [nscheme-2p2](../.beads/issues.jsonl) **Related:** [0001 — Tree-walking interpreter](0001-tree-walking-interpreter.md), [0008 — Hygiene beyond alpha-renaming](0008-hygiene-scope-and-syntaxref.md)
 
-> **Update (2026-06-03):** Hygiene was reworked from pure alpha-renaming to
-> a **scope-based** scheme (`nscheme-d6o`), which surfaced and fixed real
-> bugs in the SRFI 146 (mapping) and SRFI 41 (stream) macros. As a result,
-> the "Consequences → Negative" example below — `(let ((+ -)) (m 5))` —
-> now correctly returns **6** (the template's `+` resolves at definition
-> site), not 4 as this ADR originally documented. The full sets-of-scopes
-> algorithm is not yet complete; remaining work stays under `nscheme-d6o`.
+> **Update (2026-06-04):** The pure-alpha-renaming mechanism described
+> below was extended — see **[ADR 0008](0008-hygiene-scope-and-syntaxref.md)**
+> — with definition-site `SyntaxRef` resolution and a per-expansion scope
+> (`nscheme-d6o`), which fixed real bugs in the SRFI 146 (mapping) and
+> SRFI 41 (stream) macros. As a result, the "Consequences → Negative"
+> example below — `(let ((+ -)) (m 5))` — now correctly returns **6** (the
+> template's `+` resolves at definition site), not 4 as this ADR
+> originally documented. Full sets-of-scopes remains future work under
+> `nscheme-d6o`.
 
 ## Context
 

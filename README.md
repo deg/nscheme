@@ -219,6 +219,8 @@ See [`docs/`](docs/) for architecture decision records:
 - 0004 — Continuations as cloned frame stacks
 - 0005 — Exception handling (incl. how primitive errors flow as raises)
 - 0006 — Library / module system
+- 0007 — Filesystem-loaded libraries for R7RS-large
+- 0008 — Hygiene beyond alpha-renaming (def-site `SyntaxRef` + per-expansion scope; supersedes 0003's mechanism)
 
 ADR 0001 is the load-bearing one: it explains why the evaluator is a step-loop with continuation frames rather than recursive `eval` calls, and why that choice makes TCO and `call/cc` cheap.
 

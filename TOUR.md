@@ -83,10 +83,10 @@ At this point you understand what a tree-walking interpreter is.
 Concept-first. Use the ADRs as your concept-by-concept walkthrough; dip into the source where they cite it.
 
 1. [`docs/0002-numeric-tower.md`](docs/0002-numeric-tower.md) — what makes Scheme numbers different from most languages.
-2. [`docs/0003-syntax-rules-hygiene.md`](docs/0003-syntax-rules-hygiene.md) — pattern-based macros and hygiene.
+2. [`docs/0003-syntax-rules-hygiene.md`](docs/0003-syntax-rules-hygiene.md) and [`docs/0008-hygiene-scope-and-syntaxref.md`](docs/0008-hygiene-scope-and-syntaxref.md) — pattern-based macros and hygiene (0008 is how hygiene grew past plain alpha-renaming).
 3. [`docs/0004-continuations.md`](docs/0004-continuations.md) — first-class continuations.
 4. [`docs/0005-exception-handling.md`](docs/0005-exception-handling.md) — how exceptions live on the same frame stack.
-5. [`docs/0006-library-system.md`](docs/0006-library-system.md) — modules.
+5. [`docs/0006-library-system.md`](docs/0006-library-system.md) and [`docs/0007-filesystem-library-loader.md`](docs/0007-filesystem-library-loader.md) — modules, and how the R7RS-large libraries load from disk.
 
 Then read R7RS-small itself for the bits the ADRs don't cover (control flow, basic types, the standard procedures in §6).
 
@@ -145,6 +145,8 @@ The `docs/000N-*.md` files are the ADRs — durable records of the load-bearing 
 - [0004 — Continuations as cloned frame stacks](docs/0004-continuations.md)
 - [0005 — Exception handling on the frame stack](docs/0005-exception-handling.md)
 - [0006 — Library / module system](docs/0006-library-system.md)
+- [0007 — Filesystem-loaded libraries for R7RS-large](docs/0007-filesystem-library-loader.md)
+- [0008 — Hygiene beyond alpha-renaming](docs/0008-hygiene-scope-and-syntaxref.md) (supersedes 0003's mechanism)
 
 ## Test corpus
 
