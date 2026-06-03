@@ -98,6 +98,12 @@ fn srfi_158_generator_reference_suite() {
 }
 
 #[test]
+fn srfi_134_ideque_reference_suite() {
+    // SRFI 134 reference suite (Shiro Kawai). ~119 assertions.
+    assert_suite_clean("srfi-134-test.scm", 110);
+}
+
+#[test]
 #[ignore = "passes, but ~2 min of ~1400 assertions on the tree-walking interpreter (nscheme-6mp); run with --ignored"]
 fn srfi_132_sort_reference_suite() {
     // SRFI 132 reference suite (Olin Shivers). Its `fail` raises on any
