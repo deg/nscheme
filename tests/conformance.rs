@@ -173,6 +173,14 @@ fn srfi_115_regex_reference_suite() {
 }
 
 #[test]
+fn srfi_160_bytevector_reference_suite() {
+    // SRFI 160 reference suite (shared-tests.scm), the s16 instantiation
+    // — exercises the full type-agnostic SRFI 160 op set on the
+    // signed-16-bit variant. ~110 assertions.
+    assert_suite_clean("srfi-160-test.scm", 105);
+}
+
+#[test]
 fn srfi_41_stream_reference_suite() {
     // SRFI 41 reference suite (Philip Bewig), ~174 R6RS-style `assert`
     // checks that raise on failure; running to completion means all
