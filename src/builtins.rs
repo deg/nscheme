@@ -505,11 +505,10 @@ fn num_div(a: Num, b: Num) -> Result<Num, RuntimeError> {
         ));
     }
     if a.is_inexact() || b.is_inexact() {
-        let bf = b.to_f64();
-        if bf == 0.0 {
-            return Err(RuntimeError::DivisionByZero);
-        }
-        return Ok(Num::Float(a.to_f64() / bf));
+        // IEEE 754 / R7RS: inexact (flonum) division by zero yields a
+        // signed infinity or NaN, not an error. Only *exact* division by
+        // zero (the rational branch below) is an error.
+        return Ok(Num::Float(a.to_f64() / b.to_f64()));
     }
     let br = b.to_rational();
     if br.is_zero() {
@@ -1395,8 +1394,23 @@ fn install_misc(env: &EnvRef) {
             };
             return Ok(result);
         }
+        // Inexact (real) base with a NON-NEGATIVE exact-integer exponent:
+        // use powi (repeated squaring), which rounds per-multiplication
+        // like x*x*x, rather than powf (exp/log) which loses up to a ULP;
+        // this makes (expt x 3) agree with (* x x x), as SRFI 144 expects.
+        // Negative exponents stay on powf: powi computes them as
+        // 1/base^|n|, which underflows to 0 for extreme cases like
+        // (expt 2.0 -1074) where the true value is the subnormal 2^-1074.
+        let base_num = Num::from_value(&args[0])?;
+        if !base_num.is_complex()
+            && let Value::Int(n) = &args[1]
+            && *n >= 0
+            && let Ok(ni) = i32::try_from(*n)
+        {
+            return Ok(Value::Float(base_num.to_f64().powi(ni)));
+        }
         // Otherwise fall through to f64.
-        let b = Num::from_value(&args[0])?.to_f64();
+        let b = base_num.to_f64();
         let e = Num::from_value(&args[1])?.to_f64();
         Ok(Value::Float(b.powf(e)))
     });

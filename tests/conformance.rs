@@ -92,6 +92,26 @@ fn srfi_127_lseq_reference_suite() {
 }
 
 #[test]
+fn srfi_144_flonum_reference_suite() {
+    // SRFI 144 reference suite (William D Clinger), 1276 assertions via
+    // its own (tests scheme test) framework; we read its failure count.
+    set_search_path(vec![lib_dir()]);
+    let path = PathBuf::from(format!(
+        "{}/tests/r7rs-large-corpus/srfi-144-test.scm",
+        env!("CARGO_MANIFEST_DIR")
+    ));
+    let src = std::fs::read_to_string(&path).expect("read suite");
+    let env = Env::new_global();
+    install_base(&env).expect("install_base");
+    eval_source(&src, env.clone()).expect("SRFI 144 reference suite ran");
+    assert_eq!(
+        int_of(&env, "(flonum-test-failure-count)"),
+        0,
+        "SRFI 144 reference suite had a failed assertion"
+    );
+}
+
+#[test]
 fn srfi_146_mapping_reference_suite() {
     // SRFI 146 reference suite (Marc Nieper-Wißkirchen). ~97 assertions,
     // including the delete operations that the hygiene fix unblocked.

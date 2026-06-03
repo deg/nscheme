@@ -713,16 +713,18 @@
 (define flnumerator
   (flop1 'flnumerator
          (lambda (x)
-           (if (flnan? x)
-               x
-               (r6rs:flnumerator x)))))
+           (cond ((flnan? x) x)
+                 ;; SRFI 144: numerator of an infinity is that infinity.
+                 ((flinfinite? x) x)
+                 (else (r6rs:flnumerator x))))))
 
 (define fldenominator
   (flop1 'fldenominator
          (lambda (x)
-           (if (flnan? x)
-               x
-               (r6rs:fldenominator x)))))
+           (cond ((flnan? x) x)
+                 ;; SRFI 144: denominator of an infinity is 1.0.
+                 ((flinfinite? x) 1.0)
+                 (else (r6rs:fldenominator x))))))
 
 ;;; Exponents and logarithms
 
