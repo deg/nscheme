@@ -92,6 +92,13 @@ fn srfi_127_lseq_reference_suite() {
 }
 
 #[test]
+fn srfi_146_mapping_reference_suite() {
+    // SRFI 146 reference suite (Marc Nieper-Wißkirchen). ~97 assertions,
+    // including the delete operations that the hygiene fix unblocked.
+    assert_suite_clean("srfi-146-test.scm", 90);
+}
+
+#[test]
 fn srfi_125_hash_table_reference_suite() {
     // SRFI 125 reference suite (William D Clinger). It keeps its own
     // pass/fail state in `ultimate-exit-status` (0 = all passed) rather
