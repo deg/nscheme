@@ -173,6 +173,22 @@ fn srfi_115_regex_reference_suite() {
 }
 
 #[test]
+fn srfi_41_stream_reference_suite() {
+    // SRFI 41 reference suite (Philip Bewig), ~174 R6RS-style `assert`
+    // checks that raise on failure; running to completion means all
+    // passed. Exercises the stream-of/stream-let hygiene fix.
+    set_search_path(vec![lib_dir()]);
+    let path = PathBuf::from(format!(
+        "{}/tests/r7rs-large-corpus/srfi-41-test.scm",
+        env!("CARGO_MANIFEST_DIR")
+    ));
+    let src = std::fs::read_to_string(&path).expect("read suite");
+    let env = Env::new_global();
+    install_base(&env).expect("install_base");
+    eval_source(&src, env).expect("SRFI 41 reference suite must run with no failed assertion");
+}
+
+#[test]
 fn srfi_14_charset_reference_suite() {
     // SRFI 14 reference suite (Olin Shivers). Its own `test` macro
     // raises on the first failed form, so running to completion without

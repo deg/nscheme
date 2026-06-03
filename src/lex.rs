@@ -203,11 +203,13 @@ impl<'a> Lexer<'a> {
             return Ok(None);
         };
         match c {
-            '(' => {
+            // `[` `]` are accepted as synonyms for `(` `)`, an
+            // extension most Schemes (and all R6RS-derived code) use.
+            '(' | '[' => {
                 self.advance(c);
                 Ok(Some(self.tok(TokenKind::LParen, start)))
             }
-            ')' => {
+            ')' | ']' => {
                 self.advance(c);
                 Ok(Some(self.tok(TokenKind::RParen, start)))
             }
@@ -831,7 +833,7 @@ fn is_initial(c: char) -> bool {
 /// A delimiter terminates a token. R7RS §7.1.1: whitespace, parens,
 /// `"`, `;`, `|`, and `#` (when it starts a new token).
 fn is_delimiter(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '(' | ')' | '"' | ';' | '|')
+    c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | '"' | ';' | '|')
 }
 
 impl fmt::Display for Span {
