@@ -68,7 +68,7 @@ fn build_base_env() -> Result<EnvRef, EvalError> {
 
 fn print_usage() {
     eprintln!(
-        "nscheme {} — R7RS-large Scheme interpreter",
+        "nscheme {} — R7RS Scheme interpreter",
         nscheme::VERSION
     );
     eprintln!();
@@ -130,7 +130,7 @@ fn run_files_then_repl(env: &EnvRef, paths: &[String]) -> ExitCode {
 
 fn run_repl(env: &EnvRef) -> ExitCode {
     println!(
-        "nscheme {} — R7RS-large interpreter. Type (exit) or press Ctrl-D to quit.",
+        "nscheme {} — R7RS Scheme interpreter. Type (exit) or press Ctrl-D to quit.",
         nscheme::VERSION
     );
     let mut rl = match rustyline::Editor::<(), DefaultHistory>::new() {

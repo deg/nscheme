@@ -73,7 +73,7 @@ Run with no arguments to enter the read-eval-print loop:
 ```
 
 ```
-nscheme 0.1.0 — R7RS-large interpreter. Type (exit) or press Ctrl-D to quit.
+nscheme 0.1.0 — R7RS Scheme interpreter. Type (exit) or press Ctrl-D to quit.
 > (+ 1 2 3)
 6
 > (define (square x) (* x x))
