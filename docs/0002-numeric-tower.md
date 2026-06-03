@@ -2,6 +2,13 @@
 
 **Status:** Accepted (2026-05-21) **Bead:** [nscheme-c92](../.beads/issues.jsonl) **Related:** [0001 — Tree-walking interpreter](0001-tree-walking-interpreter.md)
 
+> **Update (2026-06-03):** Complex numbers have since landed. The
+> "Consequences → Negative" note below ("we don't yet recognize complex
+> numbers — the parser errors") is no longer true: complex literals like
+> `1+2i` now parse and evaluate, and `make-rectangular` works. One
+> limitation remains — exact-complex arithmetic falls through to inexact
+> (`(* 1+2i 1+2i)` is computed in floats); tracked in `nscheme-5mn`.
+
 ## Context
 
 R7RS-small §6.2 defines a *numeric tower* with exact and inexact representations and well-defined promotion rules. A faithful implementation needs:

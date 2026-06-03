@@ -1,6 +1,19 @@
 # ADR 0006 — Library / module system
 
-**Status:** Accepted (2026-05-21) **Bead:** [nscheme-08v](../.beads/issues.jsonl)
+**Status:** Accepted (2026-05-21); extended for R7RS-large, see note **Bead:** [nscheme-08v](../.beads/issues.jsonl)
+
+> **Update (2026-06-03):** Two "Consequences → Negative / Open follow-ups"
+> items below have since been resolved, in service of the R7RS-large libraries:
+> - **Filesystem `.sld` discovery** (`nscheme-9q5`) now exists: an
+>   `(import (foo bar))` that isn't defined inline is resolved to
+>   `foo/bar.sld` on a search path (`NSCHEME_LIB_PATH` → compiled-in
+>   `<crate>/lib` → `./lib`). The 21 R7RS-large SRFI libraries ship this way
+>   under `lib/`.
+> - **Import modifiers** `only` / `except` / `prefix` / `rename` are
+>   implemented (`resolve_import_set` in `eval.rs`; see `tests/import_qualifiers.rs`).
+>
+> The built-in-library-as-no-op behavior and strict per-library export sets
+> are unchanged from what's described below.
 
 ## Context
 
