@@ -10,6 +10,7 @@
 //!
 //!   nscheme            — start the interactive REPL
 //!   nscheme FILE       — evaluate FILE and exit (no REPL)
+//!   nscheme -i FILE... — evaluate FILE(s), then stay in the REPL
 //!   nscheme -e EXPR    — evaluate EXPR and print the result, then exit
 //!
 //! ## Read alongside
@@ -48,6 +49,9 @@ fn main() -> ExitCode {
             print_usage();
             ExitCode::SUCCESS
         }
+        [flag, rest @ ..] if flag == "-i" || flag == "--interactive" => {
+            run_files_then_repl(&env, rest)
+        }
         [path] => run_file(&env, Path::new(path)),
         _ => {
             print_usage();
@@ -71,6 +75,7 @@ fn print_usage() {
     eprintln!("Usage:");
     eprintln!("    nscheme              start the interactive REPL");
     eprintln!("    nscheme FILE         evaluate FILE and exit");
+    eprintln!("    nscheme -i FILE...   evaluate FILE(s), then stay in the REPL");
     eprintln!("    nscheme -e EXPR      evaluate EXPR, print result, exit");
     eprintln!("    nscheme -h, --help   show this message");
 }
@@ -101,6 +106,26 @@ fn run_file(env: &EnvRef, path: &Path) -> ExitCode {
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
+}
+
+/// `nscheme -i FILE...` — evaluate each FILE into `env` (so its
+/// definitions stay live), then hand that same env to the REPL. A file
+/// that fails to read or evaluate is reported and skipped; the REPL
+/// still starts so the session isn't lost. With no files, this is just
+/// the plain REPL.
+fn run_files_then_repl(env: &EnvRef, paths: &[String]) -> ExitCode {
+    for path in paths {
+        let p = Path::new(path);
+        match std::fs::read_to_string(p) {
+            Ok(source) => {
+                if let Err(e) = eval_source(&source, env.clone()) {
+                    eprintln!("error loading {}: {e}", p.display());
+                }
+            }
+            Err(e) => eprintln!("nscheme: cannot read {}: {e}", p.display()),
+        }
+    }
+    run_repl(env)
 }
 
 fn run_repl(env: &EnvRef) -> ExitCode {

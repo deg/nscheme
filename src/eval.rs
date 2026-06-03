@@ -637,6 +637,7 @@ fn is_special_form_name(name: &str) -> bool {
             | "define-values"
             | "define-record-type"
             | "eval"
+            | "load"
             | "let-values"
             | "let*-values"
             | "parameterize"
@@ -689,6 +690,7 @@ fn dispatch_special_form(
         "define-values" => step_define_values(tail, env),
         "define-record-type" => step_define_record_type(tail, env),
         "eval" => step_eval_form(tail, env, frames),
+        "load" => step_load(tail, env),
         "let-values" => step_let_values(tail, env, frames, false),
         "let*-values" => step_let_values(tail, env, frames, true),
         "parameterize" => step_parameterize(tail, env, frames),
@@ -1362,6 +1364,43 @@ fn step_eval_form(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<S
     // the value as a new datum to evaluate. Use a small frame.
     frames.push(Frame::EvalAfter { env: env.clone() });
     Ok(Step::Eval(expr_to_eval, env))
+}
+
+/// `(load filename)` — read FILENAME and evaluate its forms in the
+/// *current* environment, so its definitions persist (this is the point
+/// of `load` at the REPL). FILENAME is evaluated and must yield a
+/// string. Relative paths resolve like `include`: against the directory
+/// of the file currently being loaded, else the working directory; a
+/// nested `load`/`include` inside the file then resolves relative to it.
+fn step_load(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
+    let parts = collect_list(&tail)
+        .map_err(|()| EvalError::malformed("load", "expected (load filename)"))?;
+    let [arg] = parts.as_slice() else {
+        return Err(EvalError::malformed(
+            "load",
+            "expected exactly one filename argument",
+        ));
+    };
+    // Evaluate the operand so `(load (string-append dir name))` works.
+    let path_val = eval(arg.clone(), env.clone())?;
+    let Value::String(s) = &path_val else {
+        return Err(EvalError::malformed(
+            "load",
+            "filename must evaluate to a string",
+        ));
+    };
+    let resolved = crate::library::resolve_include(&s.borrow());
+    let source = std::fs::read_to_string(&resolved)
+        .map_err(|e| EvalError::malformed("load", format!("read {}: {e}", resolved.display())))?;
+    let dir = resolved.parent().map_or_else(
+        || std::path::PathBuf::from("."),
+        std::path::Path::to_path_buf,
+    );
+    crate::library::push_load_dir(dir);
+    let result = eval_source(&source, env.clone());
+    crate::library::pop_load_dir();
+    result?;
+    Ok(Step::Return(Value::Unspecified))
 }
 
 /// `(define-values (formals) expr)` — evaluate `expr` (which must
