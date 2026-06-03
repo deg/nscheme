@@ -92,6 +92,12 @@ fn srfi_127_lseq_reference_suite() {
 }
 
 #[test]
+fn srfi_158_generator_reference_suite() {
+    // SRFI 158 reference suite (Shiro Kawai et al.). ~80 assertions.
+    assert_suite_clean("srfi-158-test.scm", 75);
+}
+
+#[test]
 #[ignore = "passes, but ~2 min of ~1400 assertions on the tree-walking interpreter (nscheme-6mp); run with --ignored"]
 fn srfi_132_sort_reference_suite() {
     // SRFI 132 reference suite (Olin Shivers). Its `fail` raises on any
