@@ -1,6 +1,6 @@
 # A guided tour of nscheme
 
-This document is a reading guide for the nscheme source. It exists for one reason: a Scheme interpreter is a moderately large piece of software, and opening any file cold is harder than it has to be. There are productive orders in which to read these eleven thousand lines of Rust; this is a map to them.
+This document is a reading guide for the nscheme source. It exists for one reason: a Scheme interpreter is a moderately large piece of software, and opening any file cold is harder than it has to be. There are productive orders in which to read these ~14,000 lines of Rust (plus the R7RS-large libraries — another ~20,000 lines of Scheme under `lib/`); this is a map to them.
 
 If you have not yet read [`PROJECT.md`](PROJECT.md) — the retrospective on how this codebase was built — read it first. The rest of this guide assumes you've already decided you want to read the code.
 
@@ -60,7 +60,7 @@ Once you've read the evaluator, the remaining files are small and self-contained
 
 [`src/io.rs`](src/io.rs) — port I/O. Same flat-catalog shape as `builtins.rs`.
 
-[`src/library.rs`](src/library.rs) — `define-library`, `import`, `cond-expand`. Small.
+[`src/library.rs`](src/library.rs) — `define-library`, `import` (with `only`/`except`/`prefix`/`rename`), `cond-expand`, and the **filesystem loader**: an `(import (foo bar))` that isn't built in is resolved to `foo/bar.sld` on a search path. This is how the 21 R7RS-large libraries under [`lib/`](lib/) get loaded on demand.
 
 [`src/main.rs`](src/main.rs) — the CLI frontend. The thin binary that consumes the library above. Wraps an interactive REPL with `rustyline` for line editing.
 
@@ -113,7 +113,7 @@ Pattern-first. nscheme uses a deliberately small slice of Rust — almost no tra
 7. [`src/macros.rs`](src/macros.rs) — newtypes for distinguishing same-named things (`VarKey { name, scope }`). When `HashMap<Symbol, _>` isn't precise enough, you wrap.
 8. [`src/builtins.rs`](src/builtins.rs) — `fn` pointers as a registration mechanism. A flat catalog of `define(env, "name", arity, |args| { … })` calls; no trait objects, no boxing, no virtual dispatch.
 
-After this, you've seen what idiomatic Rust looks like in a 13,000-line single-author project. The style is conservative; what you don't see — heavy generics, traits everywhere, async — is itself a design statement worth noticing.
+After this, you've seen what idiomatic Rust looks like in a ~14,000-line single-author project. The style is conservative; what you don't see — heavy generics, traits everywhere, async — is itself a design statement worth noticing.
 
 ### "I want to extend nscheme"
 
@@ -121,7 +121,7 @@ Goal-first.
 
 - **Add a new primitive procedure**: read `src/builtins.rs` and pick an existing primitive with a similar shape. Copy its `define(env, "name", arity, |args| { … })` pattern.
 - **Add a new special form**: read `src/eval.rs`'s `step_eval` dispatcher, then pick a small existing `step_X_form` helper as a template. Add an arm to the dispatcher's match and a sibling `step_yourform` function.
-- **Implement a new library**: read `src/library.rs` and the open beads under `nscheme-lul` and `nscheme-oeg` for the R7RS-large library roadmap.
+- **Implement a new library**: drop a `.sld` file under [`lib/`](lib/) (e.g. `lib/scheme/foo.sld` or `lib/srfi/N.sld`) and the filesystem loader in `src/library.rs` will find it on `(import (scheme foo))`. Mirror an existing one — the 21 R7RS-large libraries there (Red + Tangerine editions) are worked examples.
 - **Change the evaluator architecture** (e.g. compile to bytecode): read [`docs/0001-tree-walking-interpreter.md`](docs/0001-tree-walking-interpreter.md) first; the architectural-decision record explains what choosing a tree-walking step-loop bought us and what a bytecode VM would change.
 
 The `bd` issue tracker (`bd ready`) lists all open work with rationale.
@@ -154,7 +154,9 @@ The `docs/000N-*.md` files are the ADRs — durable records of the load-bearing 
 cargo test --test r7rs_chibi -- --nocapture
 ```
 
-It's the most direct way to confirm that a change you make hasn't broken something.
+It's the most direct way to confirm that a change you make hasn't broken something for the R7RS-small core.
+
+For the R7RS-large libraries, [`tests/conformance.rs`](tests/conformance.rs) runs each library's *actual upstream SRFI reference suite* (vendored under [`tests/r7rs-large-corpus/`](tests/r7rs-large-corpus/)) — 18 of 21 libraries, ~5,400 verbatim assertions. [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) is the map of which suite covers which library and what each one surfaced. And [`docs/showcase/`](docs/showcase/) is a dozen short programs that exercise those libraries in anger — a good way to get a feel for what they offer.
 
 ## Where to go next
 

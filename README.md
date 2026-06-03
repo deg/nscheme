@@ -1,15 +1,17 @@
 # nscheme
 
-An [R7RS-small](https://small.r7rs.org/) Scheme interpreter written in Rust. Built primarily as an experiment in autonomous AI-assisted development; not (yet) a production-grade implementation.
+An [R7RS](https://standards.scheme.org/) Scheme interpreter written in Rust — the R7RS-small (2013) core plus the ratified **R7RS-large** libraries (Red + Tangerine editions). Built primarily as an experiment in autonomous AI-assisted development; not (yet) a production-grade implementation.
 
 - **Reading the code?** Start with [TOUR.md](TOUR.md) — a guided tour of the source with suggested reading orders.
 - **Curious how it was built?** [PROJECT.md](PROJECT.md) is the retrospective on the AI-assisted build process.
+- **What can it do?** [docs/showcase/](docs/showcase/) is a dozen tiny programs that show off the R7RS-large libraries.
+- **How conformant is it?** [docs/CONFORMANCE.md](docs/CONFORMANCE.md) — each library runs its actual upstream SRFI reference suite.
 - **Contributing or extending it?** [docs/STYLE.md](docs/STYLE.md) describes the in-code commentary conventions; [docs/](docs/) holds the architecture decision records.
 
 ## What this is
 
-- A **tree-walking interpreter** for a subset of Scheme — Lisp's oldest standardized dialect.
-- The language target is **R7RS-small (2013)**, the 80-page revised report that most modern Scheme implementations follow as their baseline.
+- A **tree-walking interpreter** for Scheme — Lisp's oldest standardized dialect.
+- The language target is **R7RS-small (2013)** — the 88-page revised report most modern Schemes track — plus the **R7RS-large** library set: 21 SRFI libraries from the ratified Red (2016) and Tangerine (2019) editions, loaded from `lib/` as `.sld` files. Examples: `(scheme list)`, `(scheme comparator)`, `(scheme mapping)`, `(scheme set)`, `(scheme regex)`, `(scheme generator)`, `(scheme stream)`, `(scheme show)`. See [docs/CONFORMANCE.md](docs/CONFORMANCE.md) for the full roster.
 - Implemented in Rust, single binary, no runtime dependencies beyond what `cargo` pulls in at build time.
 
 ## Installation
@@ -71,7 +73,7 @@ Run with no arguments to enter the read-eval-print loop:
 ```
 
 ```
-nscheme 0.1.0 — R7RS-small interpreter. Type (exit) or press Ctrl-D to quit.
+nscheme 0.1.0 — R7RS-large interpreter. Type (exit) or press Ctrl-D to quit.
 > (+ 1 2 3)
 6
 > (define (square x) (* x x))
@@ -99,7 +101,15 @@ History is saved to `~/.nscheme_history`. Press the up-arrow to recall previous 
 ./target/release/nscheme path/to/program.scm
 ```
 
-Evaluates each top-level expression in the file in order. Output is silent (errors go to stderr); use `(display …)` for output once T14 lands.
+Evaluates each top-level expression in the file in order. `(display …)` / `(write …)` print to stdout; errors go to stderr.
+
+### Run a file, then stay in the REPL
+
+```bash
+./target/release/nscheme -i path/to/program.scm
+```
+
+Evaluates the file (one or more files) into the session, then drops you into the REPL with all of its definitions — and its imports — still live. You can also `(load "file.scm")` from inside a running REPL. See [docs/showcase/](docs/showcase/) for worked examples.
 
 ### Evaluate a one-shot expression
 
@@ -163,38 +173,41 @@ A more thorough Scheme primer: [*The Scheme Programming Language*](https://www.s
 
 ## What's implemented
 
-Roughly: most of R7RS-small except the items that intentionally needed their own design effort. See the `bd` issue tracker (`bd list --status=open`) for the current backlog.
+All of R7RS-small, plus the R7RS-large library set. See the `bd` issue tracker (`bd list --status=open`) for the remaining backlog (mostly refinements — see "Known gaps" below).
 
 Currently working:
 
-- Lexer + parser
+- Lexer + parser (including `[ ]` as a synonym for `( )`)
 - Evaluator with proper tail calls and lexical closures
-- Special forms: `quote`, `if`, `lambda`, `define`, `set!`, `begin`, `let`, `let*`, `letrec`/`letrec*`, named `let`, `cond` (with `=>` clauses), `case`, `and`/`or`, `when`/`unless`, `do`, `quasiquote`
+- Special forms: `quote`, `if`, `lambda`, `define`, `set!`, `begin`, `let`, `let*`, `letrec`/`letrec*`, named `let`, `cond` (with `=>` clauses), `case`, `and`/`or`, `when`/`unless`, `do`, `quasiquote`, `case-lambda`, `define-values`, `define-record-type`, `let-values`/`let*-values`, `parameterize`, `guard`, `delay`/`delay-force`, `eval`, `load`
 - Base library: arithmetic with exact/inexact promotion, all the type predicates, equality (`eq?`/`eqv?`/`equal?`), list operations (`cons`, `car`, `cdr`, `length`, `reverse`, `append`, `list-ref`, `member`/`assoc` families), `map`, `for-each`
 
 ### Also implemented
 
-- Full numeric tower (`i64` / arbitrary-precision `BigInt` / exact `BigRational` / `f64`) with R7RS exact/inexact promotion
+- Full numeric tower (`i64` / arbitrary-precision `BigInt` / exact `BigRational` / `f64` / `Complex`) with R7RS exact/inexact promotion; complex literals (`1+2i`) parse and evaluate
 - String / char / symbol / vector / bytevector operations with Unicode-aware string indexing
-- Textual ports (string and file), `display` / `write` / `read-char`, `eof-object`
-- Hygienic `syntax-rules` (alpha-renaming) — `define-syntax`, `let-syntax`, `letrec-syntax`
-- `define-library`, `import`, `cond-expand` (built-in `(scheme …)` libraries are no-op imports)
+- Textual ports (string and file), `display` / `write` / `read-char` / datum `read`, `eof-object`, `call-with-output-file` / `call-with-input-file`
+- Hygienic `syntax-rules` (scope-based) — `define-syntax`, `let-syntax`, `letrec-syntax`
+- `define-library`, `import` (with `only` / `except` / `prefix` / `rename`), `cond-expand`, and a **filesystem loader** that finds `(import (foo bar))` on disk as `foo/bar.sld` (search path: `NSCHEME_LIB_PATH` → compiled-in default → `./lib`)
 - `call/cc`, `call-with-current-continuation`, `dynamic-wind`, `apply`
 - Exception handling: `raise`, `raise-continuable`, `with-exception-handler`, `guard`, error objects
 - `delay` / `force` / `make-promise`, lazy evaluation
 - `values` / `call-with-values` / `let-values` / `let*-values`
-- `make-parameter` / `parameterize` (without continuation-jump semantics)
+- `make-parameter` / `parameterize`
 
-### Documented gaps
+### R7RS-large libraries
 
-Things explicitly out of scope for v1, with deeper detail in [`docs/`](docs/) and the `bd` issue tracker:
+21 SRFI libraries from the ratified Red (2016) and Tangerine (2019) editions ship as `.sld` files under `lib/` and are loaded on demand. Among them: list (SRFI 1), comparator (128), set/bag (113), hash-table (125), mapping (146), regex (115), generator (158), stream (41), ideque (134), lseq (127), list-queue (117), bitwise (151), fixnum/flonum (143/144), division (141), box (111), charset (14), show (159), sort (132), bytevector (160). 18 of the 21 run their actual upstream SRFI reference suites green (~5,400 assertions); see [docs/CONFORMANCE.md](docs/CONFORMANCE.md).
 
-- Complex numbers (`make-rectangular`, etc.)
-- `eval` from Scheme code (the host evaluator exists but isn't exposed as `(scheme eval)`'s `eval`)
-- `case-lambda`
-- `(scheme time)`, `(scheme process-context)` library bindings
-- Full datum `read` (we have `read-char`/`read-line` only)
-- Definition-site free-identifier capture in macros (the standard hygiene example with shadowed `+` returns the call-site `+`, not the macro's)
+### Known gaps
+
+Tracked in the `bd` issue tracker, with deeper detail in [`docs/`](docs/):
+
+- `eval` is a special form, not yet a first-class procedure you can pass as a value (`nscheme-iii`)
+- Exact-complex arithmetic falls through to inexact — `1+2i` works but `(* 1+2i 1+2i)` is computed in floats (`nscheme-5mn`)
+- Hygiene is scope-based and passes the canonical tests, but the full sets-of-scopes algorithm is not yet complete (`nscheme-d6o`)
+- Performance: it's a tree-walking interpreter with no bytecode VM, so heavy loops are slow (`nscheme-6mp`)
+- Smaller reader / Unicode-case-folding / error-category refinements (`nscheme-9gy`, `nscheme-vfp`, `nscheme-1o2`)
 
 ## Design
 
@@ -202,7 +215,7 @@ See [`docs/`](docs/) for architecture decision records:
 
 - 0001 — Tree-walking interpreter with explicit step-loop
 - 0002 — Numeric tower
-- 0003 — `syntax-rules` hygiene via alpha-renaming
+- 0003 — `syntax-rules` hygiene (originally alpha-renaming; since reworked to scope-based — see the ADR's update note)
 - 0004 — Continuations as cloned frame stacks
 - 0005 — Exception handling (incl. how primitive errors flow as raises)
 - 0006 — Library / module system
@@ -217,7 +230,16 @@ ADR 0001 is the load-bearing one: it explains why the evaluator is a step-loop w
 cargo test
 ```
 
-That runs about **335 tests across 16 files** in a few seconds, plus the chibi conformance corpus separately. The suite covers each module's unit tests plus end-to-end integration tests for evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters, and an in-house R7RS conformance corpus.
+That runs about **624 tests across ~40 files** in a few seconds (the slow SRFI 132 sort suite is `#[ignore]`d — run it with `-- --ignored`). The suite covers each module's unit tests, end-to-end integration tests (evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters), the in-house R7RS conformance corpus, and the R7RS-large reference-suite harness described below.
+
+### R7RS-large reference suites
+
+`tests/conformance.rs` runs each R7RS-large library against its **actual upstream SRFI reference test suite** (vendored under `tests/r7rs-large-corpus/`, adapted only at the non-portable preamble). 18 of the 21 libraries have a portable upstream suite and all 18 run green — roughly **5,400 verbatim upstream assertions**. The full story, including the bugs these suites surfaced, is in [docs/CONFORMANCE.md](docs/CONFORMANCE.md).
+
+```bash
+cargo test --test conformance              # the fast suites
+cargo test --test conformance -- --ignored # also the ~2-min SRFI 132 sort suite
+```
 
 ### Running specific tests
 

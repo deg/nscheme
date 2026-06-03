@@ -51,20 +51,66 @@ bd close <id>         # Complete work
 <!-- END BEADS INTEGRATION -->
 
 
+## What This Is
+
+`nscheme` is an R7RS Scheme interpreter in Rust: the R7RS-small (2013) core
+plus 21 R7RS-large SRFI libraries (Red 2016 + Tangerine 2019). Tree-walking,
+single binary, no bytecode VM. See `README.md` for the user-facing overview,
+`TOUR.md` for a source reading guide, and `docs/` for the ADRs.
+
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+cargo build                         # debug binary at target/debug/nscheme
+cargo build --release               # optimized binary at target/release/nscheme
+
+cargo test                          # full suite (~624 tests; SRFI 132 sort is #[ignore]d)
+cargo test --test conformance       # R7RS-large upstream SRFI reference suites
+cargo test --test conformance -- --ignored   # also the ~2-min sort suite
+cargo test --test r7rs_chibi -- --nocapture  # chibi R7RS-small corpus (1180 forms / 1225 assertions)
+cargo test <name>                   # any test whose name matches
+
+cargo clippy --all-targets -- -D warnings    # lint (warnings are errors)
+cargo fmt                           # format;  cargo fmt --check to verify
 ```
+
+Run a program: `./target/debug/nscheme FILE`. Stay in the REPL after loading:
+`./target/debug/nscheme -i FILE`. The interpreter finds `lib/` automatically;
+override with `NSCHEME_LIB_PATH=lib` if you've moved things.
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+- The crate is a **library + thin binary**: all language behavior lives in
+  `src/*.rs`; `src/main.rs` is just the CLI/REPL frontend.
+- Pipeline: `lex.rs` (hand-written state machine) → `parse.rs` (produces
+  `Value`s directly — code is data) → `eval.rs`.
+- `eval.rs` is a **step-loop, not recursive `eval`**: a `Step`/`Frame` state
+  machine driven by a `loop`. This is what makes TCO and `call/cc` (a
+  `frames.clone()`) cheap. Three dispatch tables: `step_eval` (special forms),
+  `step_apply` (callables), `resume` (pending frames). See ADR 0001.
+- `value.rs` is the data model (the `Value` enum + the three equality
+  predicates + the numeric tower). `builtins.rs` is the flat catalog of
+  primitives; `io.rs` is ports. `macros.rs` is scope-based `syntax-rules`.
+- `library.rs` is `define-library`/`import`/`cond-expand` **plus a filesystem
+  loader**: `(import (foo bar))` resolves to `foo/bar.sld` on the search path
+  (`NSCHEME_LIB_PATH` → compiled-in `<crate>/lib` → `./lib`). The 21
+  R7RS-large libraries live in `lib/` as `.sld` source.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- **Issue tracking is `bd` (beads), not markdown TODOs** — see the Beads
+  section above. File/claim a bead before non-trivial work.
+- **In-code teaching commentary**: every source file has an annotated header;
+  inline "Rust note" / "Scheme note" comments explain an idiom or concept once
+  at its first appearance. Match this style. Conventions are in `docs/STYLE.md`.
+- **A new primitive** → add to `builtins.rs` (copy a same-shape `define(...)`).
+  **A new special form** → add an arm to `eval.rs`'s `dispatch_special_form`
+  and a sibling `step_*` helper, and register the name in `is_special_form_name`.
+  **A new library** → drop a `.sld` under `lib/` (e.g. `lib/scheme/foo.sld` or
+  `lib/srfi/N.sld`); the loader finds it. Mirror an existing one.
+- **ADRs are history**: `docs/000N-*.md` record decisions as of their date.
+  When a decision changes, add a dated status-note at the top rather than
+  rewriting the body.
+- **Conformance over hand-rolled tests**: a library's coverage should be its
+  real upstream SRFI suite (`tests/conformance.rs` + `tests/r7rs-large-corpus/`)
+  where one exists; hand-mined tests only where upstream ships none.

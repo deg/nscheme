@@ -1,4 +1,9 @@
-//! R7RS-small library / module system (§5.6).
+//! R7RS library / module system (§5.6), with a filesystem loader.
+//!
+//! Beyond the R7RS-small core forms, this module discovers libraries on
+//! disk: an `(import (foo bar))` that isn't built in is resolved to
+//! `foo/bar.sld` on a search path, which is how the R7RS-large SRFI
+//! libraries under `lib/` are loaded on demand.
 //!
 //! ## What you'll learn here
 //!

@@ -1,4 +1,5 @@
-//! nscheme — an R7RS-small Scheme interpreter.
+//! nscheme — an R7RS Scheme interpreter (R7RS-small core plus the
+//! R7RS-large SRFI libraries, loaded from `lib/` on disk).
 //!
 //! Library entry point. The command-line REPL is a thin binary in
 //! `src/main.rs` that consumes this library; all language behavior

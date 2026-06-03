@@ -15,6 +15,15 @@ For a reading guide to the source code, see [`../TOUR.md`](../TOUR.md).
 - [0005 — Exception handling via the frame stack](0005-exception-handling.md)
 - [0006 — Library / module system](0006-library-system.md)
 
+Each ADR records the decision as of its date. Where a decision was later
+revised, a dated status-note at the top of the ADR points to what changed
+(see 0002, 0003, and 0006) — the body is left as the historical record.
+
+## Conformance & examples
+
+- [CONFORMANCE.md](CONFORMANCE.md) — how each R7RS-large library is tested against its actual upstream SRFI reference suite (18/21 green, ~5,400 assertions).
+- [showcase/](showcase/) — a dozen tiny programs showing off the R7RS-large libraries, with a README on how to run them.
+
 ## Style guide
 
 - [STYLE.md](STYLE.md) — conventions for in-code teaching commentary. Tells you what each comment in the source is trying to accomplish.
