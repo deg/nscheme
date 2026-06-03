@@ -112,9 +112,29 @@ pub fn install_base(env: &EnvRef) -> Result<(), EvalError> {
     Ok(())
 }
 
+thread_local! {
+    /// Cache of primitive procedure objects by name. `install_base` runs
+    /// more than once per thread — once for the program env, again for
+    /// the hermetic library-loader root — and a primitive is a pure
+    /// singleton, so both installs must bind the *same* object.
+    /// Otherwise a builtin like `eq?` passed from the program into a
+    /// loaded library would not be `eq?`/`equal?` to that library's own
+    /// `eq?`, breaking code that compares predicates (e.g. SRFI 125's
+    /// make-hash-table inferring a hash from the equality predicate).
+    static PRIMITIVE_CACHE: std::cell::RefCell<std::collections::HashMap<&'static str, Value>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 fn define(env: &EnvRef, name: &'static str, arity: Arity, body: PrimitiveFn) {
-    let p = Procedure::Primitive { name, arity, body };
-    env.define(Symbol::intern(name), Value::Procedure(Rc::new(p)));
+    let v = PRIMITIVE_CACHE.with(|c| {
+        c.borrow_mut()
+            .entry(name)
+            .or_insert_with(|| {
+                Value::Procedure(Rc::new(Procedure::Primitive { name, arity, body }))
+            })
+            .clone()
+    });
+    env.define(Symbol::intern(name), v);
 }
 
 // ---------------------------------------------------------------------

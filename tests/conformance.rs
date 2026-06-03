@@ -92,6 +92,27 @@ fn srfi_127_lseq_reference_suite() {
 }
 
 #[test]
+fn srfi_125_hash_table_reference_suite() {
+    // SRFI 125 reference suite (William D Clinger). It keeps its own
+    // pass/fail state in `ultimate-exit-status` (0 = all passed) rather
+    // than via (srfi 64), so we read that after running it.
+    set_search_path(vec![lib_dir()]);
+    let path = PathBuf::from(format!(
+        "{}/tests/r7rs-large-corpus/srfi-125-test.scm",
+        env!("CARGO_MANIFEST_DIR")
+    ));
+    let src = std::fs::read_to_string(&path).expect("read suite");
+    let env = Env::new_global();
+    install_base(&env).expect("install_base");
+    eval_source(&src, env.clone()).expect("SRFI 125 reference suite ran");
+    assert_eq!(
+        int_of(&env, "ultimate-exit-status"),
+        0,
+        "SRFI 125 reference suite had a failed assertion"
+    );
+}
+
+#[test]
 fn srfi_115_regex_reference_suite() {
     // SRFI 115 reference suite (Alex Shinn). ~66 assertions.
     assert_suite_clean("srfi-115-test.scm", 60);
