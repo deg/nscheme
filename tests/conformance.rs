@@ -173,6 +173,13 @@ fn srfi_115_regex_reference_suite() {
 }
 
 #[test]
+fn srfi_159_show_reference_suite() {
+    // SRFI 159 reference suite (Duy Nguyen / Alex Shinn). ~313
+    // assertions, exercising base, columnar, and unicode combinators.
+    assert_suite_clean("srfi-159-test.scm", 300);
+}
+
+#[test]
 fn srfi_160_bytevector_reference_suite() {
     // SRFI 160 reference suite (shared-tests.scm), the s16 instantiation
     // — exercises the full type-agnostic SRFI 160 op set on the

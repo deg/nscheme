@@ -4,10 +4,9 @@
 ;;; the name (scheme show); this library is a thin re-export of our
 ;;; vendored (srfi 159).
 ;;;
-;;; NOTE: our (srfi 159) vendors the base + color sub-libraries (the
-;;; pure-Scheme combinator core); the columnar and unicode
-;;; sub-libraries are not vendored, so the names they would contribute
-;;; (columnar, tabular, wrapped, as-unicode, …) are absent here too.
+;;; Our (srfi 159) vendors the base + color combinators plus the
+;;; columnar sub-library (columnar/tabular/wrapped/show-columns/…). The
+;;; unicode sub-library (terminal-width-aware variants) is not vendored.
 (define-library (scheme show)
   (import (srfi 159))
   (export
@@ -23,4 +22,8 @@
    with with! written written-simply
    ;; color
    as-red as-blue as-green as-cyan as-yellow as-magenta as-white
-   as-black as-bold as-underline))
+   as-black as-bold as-underline
+   ;; columnar
+   call-with-output-generator call-with-output-generators columnar
+   from-file justified line-numbers show-columns string->line-generator
+   tabular wrapped wrapped/char wrapped/list))
