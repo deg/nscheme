@@ -861,8 +861,10 @@ fn process_library_decls(
                     let Value::String(p) = path_val else {
                         return Err(EvalError::malformed("include", "argument must be a string"));
                     };
-                    let source = std::fs::read_to_string(&*p.borrow()).map_err(|e| {
-                        EvalError::malformed("include", format!("read {}: {e}", p.borrow()))
+                    // Resolve relative to the including file's directory.
+                    let resolved = crate::library::resolve_include(&p.borrow());
+                    let source = std::fs::read_to_string(&resolved).map_err(|e| {
+                        EvalError::malformed("include", format!("read {}: {e}", resolved.display()))
                     })?;
                     eval_source(&source, lib_env.clone())?;
                 }

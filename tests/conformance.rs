@@ -92,6 +92,27 @@ fn srfi_127_lseq_reference_suite() {
 }
 
 #[test]
+#[ignore = "passes, but ~2 min of ~1400 assertions on the tree-walking interpreter (nscheme-6mp); run with --ignored"]
+fn srfi_132_sort_reference_suite() {
+    // SRFI 132 reference suite (Olin Shivers). Its `fail` raises on any
+    // bad result, so completing without error means every check passed.
+    // Includes the Olin reference impl from sibling files in the corpus
+    // dir, so we push that as the load directory.
+    set_search_path(vec![lib_dir()]);
+    let dir = PathBuf::from(format!(
+        "{}/tests/r7rs-large-corpus",
+        env!("CARGO_MANIFEST_DIR")
+    ));
+    let src = std::fs::read_to_string(dir.join("srfi-132-test.scm")).expect("read suite");
+    nscheme::library::push_load_dir(dir);
+    let env = Env::new_global();
+    install_base(&env).expect("install_base");
+    let result = eval_source(&src, env);
+    nscheme::library::pop_load_dir();
+    result.expect("SRFI 132 reference suite must complete with no failed check");
+}
+
+#[test]
 fn srfi_144_flonum_reference_suite() {
     // SRFI 144 reference suite (William D Clinger), 1276 assertions via
     // its own (tests scheme test) framework; we read its failure count.

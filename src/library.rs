@@ -174,6 +174,41 @@ thread_local! {
     static LOADING: RefCell<Vec<LibraryName>> = const { RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    /// Stack of directories of the files currently being loaded, so
+    /// `include` resolves a relative path against the including file's
+    /// directory (R7RS) rather than the process working directory.
+    static LOAD_DIR: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Push the directory of a file about to be loaded. Pair with
+/// [`pop_load_dir`]. Used by the loader and by program runners so
+/// `include` inside the file resolves relative to it.
+pub fn push_load_dir(dir: PathBuf) {
+    LOAD_DIR.with(|s| s.borrow_mut().push(dir));
+}
+
+/// Pop the most recently pushed load directory.
+pub fn pop_load_dir() {
+    LOAD_DIR.with(|s| {
+        s.borrow_mut().pop();
+    });
+}
+
+/// Resolve an `include` target. Absolute paths are used as-is; a
+/// relative path is joined to the directory of the file currently being
+/// loaded (or the process working directory if none).
+pub fn resolve_include(path: &str) -> PathBuf {
+    let p = PathBuf::from(path);
+    if p.is_absolute() {
+        return p;
+    }
+    LOAD_DIR.with(|s| match s.borrow().last() {
+        Some(dir) => dir.join(&p),
+        None => p,
+    })
+}
+
 /// Replace the library search path for the current thread. Primarily
 /// for tests and embedders that ship libraries in a known location;
 /// when set, it takes precedence over `NSCHEME_LIB_PATH` and the
@@ -254,7 +289,14 @@ pub fn try_load_library(name: &LibraryName) -> Result<bool, EvalError> {
     let source = std::fs::read_to_string(&path)
         .map_err(|e| malformed(&format!("reading library ({}): {e}", name.join(" "))))?;
     LOADING.with(|s| s.borrow_mut().push(name.clone()));
+    // So an `include` inside the library resolves relative to the
+    // library file's own directory.
+    let dir = path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+    push_load_dir(dir);
     let result = crate::eval::eval_source(&source, loader_root()?);
+    pop_load_dir();
     LOADING.with(|s| {
         s.borrow_mut().pop();
     });
