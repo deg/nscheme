@@ -222,6 +222,8 @@ See [`docs/`](docs/) for architecture decision records:
 - 0006 — Library / module system
 - 0007 — Filesystem-loaded libraries for R7RS-large
 - 0008 — Hygiene beyond alpha-renaming (def-site `SyntaxRef` + per-expansion scope; supersedes 0003's mechanism)
+- 0009 — First-class control procedures (`apply` / `eval` / `load`)
+- 0010 — Current ports as parameters
 
 ADR 0001 is the load-bearing one: it explains why the evaluator is a step-loop with continuation frames rather than recursive `eval` calls, and why that choice makes TCO and `call/cc` cheap.
 
@@ -233,7 +235,7 @@ ADR 0001 is the load-bearing one: it explains why the evaluator is a step-loop w
 cargo test
 ```
 
-That runs about **624 tests across ~40 files** in a few seconds (the slow SRFI 132 sort suite is `#[ignore]`d — run it with `-- --ignored`). The suite covers each module's unit tests, end-to-end integration tests (evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters), the in-house R7RS conformance corpus, and the R7RS-large reference-suite harness described below.
+That runs about **670 tests across ~45 files** in a few seconds (the slow SRFI 132 sort suite is `#[ignore]`d — run it with `-- --ignored`). The suite covers each module's unit tests, end-to-end integration tests (evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters), the in-house R7RS conformance corpus, and the R7RS-large reference-suite harness described below.
 
 ### R7RS-large reference suites
 

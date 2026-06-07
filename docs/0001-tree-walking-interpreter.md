@@ -2,6 +2,12 @@
 
 **Status:** Accepted (2026-05-21) **Bead:** [nscheme-6g4](../.beads/issues.jsonl) **Supersedes:** —
 
+> **Update (2026-06-07):** The "tail calls handled by omission" claim
+> below is now *verified* across every R7RS §3.5 tail position by
+> `tests/tail_calls.rs` (`nscheme-8g2`). Separately, `apply`/`eval`/`load`
+> moved from special forms to procedures dispatched in `step_apply` — see
+> [ADR 0009](0009-first-class-control-procedures.md).
+
 ## Context
 
 `nscheme` is an R7RS-small Scheme interpreter written in Rust. The single biggest up-front architectural decision is the shape of the evaluator. The realistic options are:

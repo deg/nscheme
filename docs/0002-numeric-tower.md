@@ -14,6 +14,12 @@
 > the exactness predicates / `exact`·`inexact` converters inspect both
 > parts. Inexactness stays contagious. (`magnitude`/`angle`/`sqrt`
 > remain inexact, as R7RS permits.)
+>
+> **Update (2026-06-07):** Float *printing* now uses the `ryu` crate for
+> the canonical shortest round-tripping digits (`nscheme-ecg`), replacing
+> a 15-then-widen heuristic that could emit a non-canonical digit at
+> boundary values. Output style (fixed vs scientific) is unchanged; only
+> the digit choice is now canonical.
 
 ## Context
 

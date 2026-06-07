@@ -16,6 +16,8 @@ For a reading guide to the source code, see [`../TOUR.md`](../TOUR.md).
 - [0006 — Library / module system](0006-library-system.md)
 - [0007 — Filesystem-loaded libraries for R7RS-large](0007-filesystem-library-loader.md)
 - [0008 — Hygiene beyond alpha-renaming: def-site `SyntaxRef` + per-expansion scope](0008-hygiene-scope-and-syntaxref.md) — supersedes (in part) 0003
+- [0009 — First-class control procedures: `apply` / `eval` / `load`](0009-first-class-control-procedures.md)
+- [0010 — Current ports as parameters](0010-current-ports-as-parameters.md)
 
 Each ADR records the decision as of its date. Where a decision was later
 revised, a dated status-note at the top of the ADR points to what changed
