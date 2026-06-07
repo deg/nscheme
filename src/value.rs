@@ -1575,56 +1575,60 @@ fn write_float(x: f64, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     if x.is_infinite() {
         return f.write_str(if x > 0.0 { "+inf.0" } else { "-inf.0" });
     }
-    // Use the shortest precision that still round-trips. R7RS
-    // §6.2.6 requires (string->number (number->string x)) to
-    // recover x; we honour that but prefer 15-digit output (chibi
-    // / Racket convention) where it round-trips, and only widen to
-    // 16 or 17 digits at boundary values (e.g. ±f64::MAX) where
-    // 15 digits is lossy.
-    for sig_digits in [15usize, 16, 17] {
-        let s = format_f64_n(x, sig_digits);
-        if let Ok(parsed) = s.parse::<f64>()
-            && parsed.to_bits() == x.to_bits()
-        {
-            return f.write_str(&s);
-        }
+    if x == 0.0 {
+        return f.write_str(if x.is_sign_negative() { "-0.0" } else { "0.0" });
     }
-    // Should not be reachable — f64 round-trips at 17 digits.
-    f.write_str(&format_f64_n(x, 17))
+    // Get the *shortest* decimal that round-trips (R7RS §6.2.6 requires
+    // `(string->number (number->string x))` to recover x). Ryu computes
+    // the canonical shortest digits directly — the same set chibi/Racket
+    // print — instead of the old "try 15 then widen to 16/17" heuristic,
+    // which could emit a non-canonical digit at boundary values
+    // (nscheme-ecg). We take Ryu's digits + exponent and reformat them
+    // with our own Scheme conventions (fixed vs scientific, `e+`, `.0`).
+    let mut buf = ryu::Buffer::new();
+    let (negative, digits, exp) = shortest_digits(buf.format_finite(x));
+    f.write_str(&render_decimal(&negative, &digits, exp))
 }
 
-/// Render a finite `f64` using exactly `sig_digits` significant
-/// digits. The output always contains a decimal point or an
-/// exponent marker so the reader reconstructs it as inexact.
-fn format_f64_n(x: f64, sig_digits: usize) -> String {
-    if x == 0.0 {
-        return if x.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
-    }
-    // `{:.Ne}` gives N digits after the decimal point in scientific
-    // form — that's `sig_digits` significant digits total when
-    // N = sig_digits - 1.
-    let prec = sig_digits.saturating_sub(1);
-    let sci = format!("{x:.prec$e}");
-    // Split into mantissa and exponent.
-    let (mant, exp_str) = sci.split_once('e').expect("scientific format");
-    let exp: i32 = exp_str.parse().expect("integer exponent");
-    let negative = mant.starts_with('-');
-    let mant_no_sign = mant.trim_start_matches('-');
-    // Mantissa is `d.dddddddddddddd` — peel off the dot.
-    let digits: String = mant_no_sign.chars().filter(|c| *c != '.').collect();
-    // Trim trailing zeros from the digit string, but keep at least
-    // one digit so a value like 1.0 stays as `1.0` not `1.`.
-    let trimmed_end = digits.trim_end_matches('0');
-    let digits: String = if trimmed_end.is_empty() {
-        "0".into()
-    } else {
-        trimmed_end.into()
+/// Parse Ryu's shortest representation into `(sign, significant-digits,
+/// exponent)` in normalized scientific form: the value equals
+/// `digits[0].digits[1..] × 10^exp`, with no leading/trailing zeros in
+/// `digits`. Ryu emits either `int.frac` or `int.frac e±NN` (lowercase
+/// `e`, `-` only for negative exponents), which this normalizes.
+fn shortest_digits(s: &str) -> (String, String, i32) {
+    let negative = s.starts_with('-');
+    let body = s.strip_prefix('-').unwrap_or(s);
+    let (mantissa, exp_part) = match body.split_once('e') {
+        Some((m, e)) => (m, e.parse::<i32>().expect("ryu integer exponent")),
+        None => (body, 0),
     };
+    let (int_part, frac_part) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    // value = (int_part ++ frac_part) × 10^(exp_part - frac_part.len())
+    let raw: String = format!("{int_part}{frac_part}");
+    let mut power = exp_part - i32::try_from(frac_part.len()).expect("frac length fits i32");
+    // Strip leading zeros (don't change value), then trailing zeros
+    // (each one raises the power by 1).
+    let mut digits = raw.trim_start_matches('0').to_string();
+    while digits.ends_with('0') {
+        digits.pop();
+        power += 1;
+    }
+    // value = digits_as_int × 10^power; in `d.ddd × 10^exp` form,
+    // exp = power + (len(digits) - 1).
+    let exp = power + i32::try_from(digits.len()).expect("digit count fits i32") - 1;
+    let sign = if negative { "-" } else { "" };
+    (sign.to_string(), digits, exp)
+}
+
+/// Render normalized `(sign, digits, exp)` — where the value is
+/// `digits[0].digits[1..] × 10^exp` — as a Scheme inexact literal. The
+/// output always contains a decimal point or an exponent marker so the
+/// reader reconstructs it as inexact.
+fn render_decimal(sign: &str, digits: &str, exp: i32) -> String {
     // Place the decimal point. The original scientific form had it
     // after one digit, so the value is `digits[0].digits[1..] * 10^exp`.
     // For the fixed form we want `whole.frac`, where `whole` and
     // `frac` are slices into `digits` shifted by `exp+1`.
-    let sign = if negative { "-" } else { "" };
     // Choose between fixed and scientific based on exponent.
     // Heuristic matches what chibi prints: fixed for -4 <= exp <= 15.
     if (-4..=15).contains(&exp) {
@@ -1634,7 +1638,7 @@ fn format_f64_n(x: f64, sig_digits: usize) -> String {
             #[allow(clippy::cast_sign_loss)]
             let dpos = exp as usize + 1;
             if dpos >= digits.len() {
-                out.push_str(&digits);
+                out.push_str(digits);
                 for _ in digits.len()..dpos {
                     out.push('0');
                 }
@@ -1651,7 +1655,7 @@ fn format_f64_n(x: f64, sig_digits: usize) -> String {
             for _ in 0..zeros {
                 out.push('0');
             }
-            out.push_str(&digits);
+            out.push_str(digits);
         }
         out
     } else {
@@ -1660,7 +1664,7 @@ fn format_f64_n(x: f64, sig_digits: usize) -> String {
         let mut out = String::new();
         out.push_str(sign);
         if digits.len() == 1 {
-            out.push_str(&digits);
+            out.push_str(digits);
             out.push_str(".0");
         } else {
             out.push(digits.as_bytes()[0] as char);

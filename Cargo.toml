@@ -2,7 +2,7 @@
 name = "nscheme"
 version = "0.1.0"
 edition = "2024"
-description = "An R7RS-small Scheme interpreter written in Rust"
+description = "An R7RS Scheme interpreter written in Rust (R7RS-small core plus R7RS-large libraries)"
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -21,6 +21,7 @@ num-bigint = "0.4"
 num-rational = { version = "0.4", default-features = false, features = ["num-bigint"] }
 num-traits = "0.2"
 num-integer = "0.1"
+ryu = "1"
 
 [dev-dependencies]
 
