@@ -26,49 +26,38 @@
 ;; chibi's `(chibi test)` allows an optional label as the first arg
 ;; to test / test-assert / test-error. We accept either form.
 
-;; Compare two test results: structurally equal for most data, but
-;; for numbers fall through to `=` (R7RS mathematical equality)
-;; rather than `equal?`'s bit-comparison so that small float
-;; round-off — inevitable when the corpus hard-codes 15-digit
-;; literals — doesn't cause spurious failures. Lists and vectors
-;; recurse element-by-element.
-;; Approximate-equal numbers when *either* side is inexact: the
-;; corpus often pins float literals to 15 significant digits, which
-;; doesn't bit-match an f64 computed from full-precision libm. Allow
-;; a small relative tolerance (and an absolute floor for values near
-;; zero). Exact-only number comparisons stay strict.
-(define $float-tolerance 1e-6)
+;; Result comparison, reproducing chibi's `(chibi test)` `test-equal?`
+;; FAITHFULLY (see chibi-scheme lib/chibi/test.scm): an inexact
+;; *expected* value matches a result within chibi's default epsilon
+;; (`current-test-epsilon` = 1e-5) via the same `approx-equal?` formula;
+;; complex values compare part-wise; everything else uses `equal?`.
+;;
+;; This is NOT a relaxation we invented — chibi's own test oracle is
+;; approximate for inexact reals, so "passes the chibi corpus" means the
+;; same thing here as it does in chibi (bead nscheme-bc7). The corpus
+;; pins a few transcendental results to 15-digit literals (e.g.
+;; `(exp 3)` -> 20.0855369231877) that differ from libm in the last
+;; ULP; chibi's epsilon is exactly what absorbs those.
+(define $test-epsilon 1e-5)  ; chibi current-test-epsilon default
 
-(define ($numbers-approx-equal? a b)
+(define ($approx-equal? a b epsilon)
   (cond
-   ((and (exact? a) (exact? b)) (= a b))
-   ((and (real? a) (real? b) (nan? a) (nan? b)) #t)
-   ((or (and (real? a) (nan? a)) (and (real? b) (nan? b))) #f)
-   ((and (real? a) (real? b))
-    (let ((diff (abs (- a b)))
-          (mag (max (abs a) (abs b))))
-      (or (= a b)
-          (< diff $float-tolerance)
-          (< (/ diff (max mag 1.0)) $float-tolerance))))
-   (else
-    ;; Complex: compare real and imaginary parts independently.
-    (and ($numbers-approx-equal? (real-part a) (real-part b))
-         ($numbers-approx-equal? (imag-part a) (imag-part b))))))
+   ((> (abs a) (abs b)) ($approx-equal? b a epsilon))
+   ((zero? a) (< (abs b) epsilon))
+   (else (< (abs (/ (- a b) b)) epsilon))))
 
-(define ($test-equal? a b)
-  (cond
-   ((and (number? a) (number? b)) ($numbers-approx-equal? a b))
-   ((and (pair? a) (pair? b))
-    (and ($test-equal? (car a) (car b))
-         ($test-equal? (cdr a) (cdr b))))
-   ((and (vector? a) (vector? b))
-    (and (= (vector-length a) (vector-length b))
-         (let loop ((i 0))
-           (cond
-            ((= i (vector-length a)) #t)
-            (($test-equal? (vector-ref a i) (vector-ref b i)) (loop (+ i 1)))
-            (else #f)))))
-   (else (equal? a b))))
+;; `(expect actual)` argument order, like chibi's comparator.
+(define ($test-equal? expect res)
+  (or (equal? expect res)
+      (if (real? expect)
+          ;; An inexact expected value accepts a result within epsilon.
+          (and (inexact? expect)
+               (real? res)
+               ($approx-equal? expect res $test-epsilon))
+          (and (complex? res)
+               (complex? expect)
+               ($test-equal? (real-part expect) (real-part res))
+               ($test-equal? (imag-part expect) (imag-part res))))))
 
 (define-syntax test
   (syntax-rules ()
@@ -82,7 +71,7 @@
          (set! $failures
                (cons (list 'raised 'expr (cdr outcome))
                      $failures)))
-        (($test-equal? (cdr outcome) expected-val)
+        (($test-equal? expected-val (cdr outcome))
          (set! $passes (+ $passes 1)))
         (else
          (set! $fails (+ $fails 1))
