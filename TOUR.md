@@ -149,6 +149,7 @@ The `docs/000N-*.md` files are the ADRs — durable records of the load-bearing 
 - [0008 — Hygiene beyond alpha-renaming](docs/0008-hygiene-scope-and-syntaxref.md) (supersedes 0003's mechanism)
 - [0009 — First-class control procedures: `apply` / `eval` / `load`](docs/0009-first-class-control-procedures.md)
 - [0010 — Current ports as parameters](docs/0010-current-ports-as-parameters.md)
+- [0011 — Error diagnostics: source locations and backtraces](docs/0011-error-diagnostics.md)
 
 ## Test corpus
 

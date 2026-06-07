@@ -5,7 +5,67 @@
 //! Used to give lex/parse errors and uncaught runtime errors a "where",
 //! not just a "what".
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+
 use crate::lex::Span;
+
+thread_local! {
+    /// The source text currently being evaluated, for byte -> line:col.
+    static SOURCE: RefCell<String> = const { RefCell::new(String::new()) };
+    /// Map from a parsed pair's pointer identity to its source span.
+    /// Populated by the parser; read by the evaluator to locate the form
+    /// it's currently evaluating (bead nscheme-tn3).
+    static SPANS: RefCell<HashMap<usize, Span>> = RefCell::new(HashMap::new());
+    /// The span of the innermost form the evaluator has entered so far —
+    /// i.e. where an error is happening right now.
+    static CURRENT: Cell<Option<Span>> = const { Cell::new(None) };
+}
+
+/// Start tracking a new top-level source string: store it and reset the
+/// per-program span map and current-form pointer.
+pub fn begin_source(source: &str) {
+    SOURCE.with(|s| {
+        let mut s = s.borrow_mut();
+        s.clear();
+        s.push_str(source);
+    });
+    SPANS.with(|m| m.borrow_mut().clear());
+    CURRENT.with(|c| c.set(None));
+}
+
+/// Record the source span of a parsed pair (keyed by pointer identity).
+pub fn record_span(pair_id: usize, span: Span) {
+    SPANS.with(|m| {
+        m.borrow_mut().insert(pair_id, span);
+    });
+}
+
+/// Note that the evaluator is now entering the pair `pair_id`; if it has
+/// a recorded span, it becomes the "current" error location. Pairs with
+/// no span (e.g. macro-expanded forms) leave the current location at the
+/// nearest enclosing recorded form.
+pub fn note_current(pair_id: usize) {
+    SPANS.with(|m| {
+        if let Some(&span) = m.borrow().get(&pair_id) {
+            CURRENT.with(|c| c.set(Some(span)));
+        }
+    });
+}
+
+/// A located block for the form currently being evaluated, if known.
+#[must_use]
+pub fn current_location() -> Option<String> {
+    let span = CURRENT.with(Cell::get)?;
+    SOURCE.with(|s| {
+        let src = s.borrow();
+        if src.is_empty() {
+            return None;
+        }
+        let loc = locate(&src, span);
+        (!loc.is_empty()).then_some(loc)
+    })
+}
 
 /// 1-based `(line, column)` of a byte offset in `source`.
 #[must_use]

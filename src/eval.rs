@@ -470,6 +470,9 @@ pub fn eval(expr: Value, env: EnvRef) -> Result<Value, EvalError> {
 /// back to whatever was about to happen at capture time, even if a
 /// later top-level form has since started evaluating.
 pub fn eval_source(source: &str, env: EnvRef) -> Result<Value, EvalError> {
+    // Track this source so runtime errors can report a `line:col`
+    // location (nscheme-tn3); parsing populates the per-pair span map.
+    crate::diagnostic::begin_source(source);
     let datums = parse_program(source)?;
     if datums.is_empty() {
         return Ok(Value::Unspecified);
@@ -498,6 +501,12 @@ pub fn eval_source(source: &str, env: EnvRef) -> Result<Value, EvalError> {
 // Special forms / Derived forms sections below.
 
 fn step_eval(expr: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
+    // Note the form we're entering so an error can report its location
+    // (nscheme-tn3). Pairs without a recorded span (macro output) leave
+    // the current location at the nearest enclosing recorded form.
+    if let Value::Pair(p) = &expr {
+        crate::diagnostic::note_current(Rc::as_ptr(p) as usize);
+    }
     // Self-evaluating values.
     match &expr {
         Value::Bool(_)

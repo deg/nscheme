@@ -80,3 +80,32 @@ fn backtrace_is_short_for_tail_recursion() {
     // Tail calls leave no CallArg frame, so the trace is empty (TCO).
     assert!(take_backtrace().is_empty());
 }
+
+// --- Stage 3: runtime source location ---
+
+#[test]
+fn runtime_error_records_source_location() {
+    let env = Env::new_global();
+    install_base(&env).expect("install_base");
+    let r = eval_source("(define (k a b) a)\n(k (+ 1 (bad)) 2)", env);
+    assert!(r.is_err());
+    let loc = nscheme::diagnostic::current_location().expect("a source location");
+    assert!(loc.contains("at line 2:"), "{loc}");
+    assert!(loc.contains("(bad)"), "{loc}");
+}
+
+#[test]
+fn location_points_at_the_failing_form_even_under_tail_calls() {
+    let env = Env::new_global();
+    install_base(&env).expect("install_base");
+    // f tail-calls g; the error is a primitive raise inside g. The
+    // backtrace is empty (TCO) but the location still pins the form.
+    let r = eval_source(
+        "(define (f x) (g x))\n(define (g x) (vector-ref (vector 1 2) 99))\n(f 0)",
+        env,
+    );
+    assert!(r.is_err());
+    let loc = nscheme::diagnostic::current_location().expect("a source location");
+    assert!(loc.contains("at line 2:"), "{loc}");
+    assert!(loc.contains("vector-ref"), "{loc}");
+}

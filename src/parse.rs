@@ -292,8 +292,11 @@ impl Parser {
             };
             match tok.kind {
                 TokenKind::RParen => {
+                    let close_end = tok.span.end;
                     self.pop();
-                    return Ok(build_list(items, Value::Null));
+                    let result = build_list(items, Value::Null);
+                    record_list_span(&result, Span::new(open_span.start, close_end));
+                    return Ok(result);
                 }
                 TokenKind::Dot => {
                     // (a b . c)
@@ -318,7 +321,9 @@ impl Parser {
                     if !matches!(closing.kind, TokenKind::RParen) {
                         return Err(ParseError::BadDottedTail { span: dot_span });
                     }
-                    return Ok(build_list(items, tail));
+                    let result = build_list(items, tail);
+                    record_list_span(&result, Span::new(open_span.start, closing.span.end));
+                    return Ok(result);
                 }
                 _ => {
                     items.push(self.parse_datum()?);
@@ -391,6 +396,14 @@ fn build_list(items: Vec<Value>, tail: Value) -> Value {
         acc = Value::cons(item, acc);
     }
     acc
+}
+
+/// Record a parsed list's source span (keyed by its head-pair pointer)
+/// so the evaluator can locate it in an error (bead nscheme-tn3).
+fn record_list_span(v: &Value, span: Span) {
+    if let Value::Pair(p) = v {
+        crate::diagnostic::record_span(std::rc::Rc::as_ptr(p) as usize, span);
+    }
 }
 
 /// Convert a [`NumberLexeme`] into a runtime [`Value`].

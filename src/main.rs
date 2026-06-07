@@ -84,16 +84,27 @@ fn print_usage() {
 /// (`line:col` + caret) for parse/lex errors, which carry a span into
 /// `source` (bead nscheme-tn3).
 fn report_error(source: &str, e: &EvalError) {
-    if let EvalError::Parse(pe) = e
-        && let Some(span) = pe.span()
-    {
-        let loc = nscheme::diagnostic::locate(source, span);
-        if !loc.is_empty() {
-            eprintln!("error: {pe}\n{loc}");
-            return;
+    // Always drain the call-chain backtrace so a stale one can't leak to
+    // a later (e.g. parse) error.
+    let trace = nscheme::eval::take_backtrace();
+    if let EvalError::Parse(pe) = e {
+        if let Some(span) = pe.span() {
+            let loc = nscheme::diagnostic::locate(source, span);
+            if !loc.is_empty() {
+                eprintln!("error: {pe}\n{loc}");
+                return;
+            }
         }
+        eprintln!("error: {e}");
+        return;
     }
     eprintln!("error: {e}");
+    if let Some(loc) = nscheme::diagnostic::current_location() {
+        eprintln!("{loc}");
+    }
+    if !trace.is_empty() {
+        eprintln!("  call trace (innermost first): {}", trace.join(" <- "));
+    }
 }
 
 fn run_expr(env: &EnvRef, source: &str) -> ExitCode {

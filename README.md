@@ -195,6 +195,7 @@ Currently working:
 - `delay` / `force` / `make-promise`, lazy evaluation
 - `values` / `call-with-values` / `let-values` / `let*-values`
 - `make-parameter` / `parameterize`
+- Error diagnostics: parse and runtime errors report `line:col` with a source caret, plus a (tail-call-correct) call-chain backtrace
 
 ### R7RS-large libraries
 
@@ -206,7 +207,7 @@ Tracked in the `bd` issue tracker, with deeper detail in [`docs/`](docs/):
 
 - Hygiene is scope-based and passes the canonical tests, but the full sets-of-scopes algorithm is not yet complete (`nscheme-d6o`)
 - Environments aren't reified: `eval`'s environment argument and `null-environment`/`scheme-report-environment` all resolve to the interaction environment
-- No source locations / backtraces on raised errors yet (`nscheme-tn3`)
+- Error locations point at the nearest enclosing *recorded* form, so an error inside macro-expanded code reports the macro call site, not the original template (`nscheme-tn3` follow-up: span-preserving macro expansion)
 - Performance: it's a tree-walking interpreter with no bytecode VM, so heavy loops are slow (`nscheme-6mp`)
 - User-defined error categories beyond `read-error?` / `file-error?` (`nscheme-1o2`)
 
@@ -224,6 +225,7 @@ See [`docs/`](docs/) for architecture decision records:
 - 0008 — Hygiene beyond alpha-renaming (def-site `SyntaxRef` + per-expansion scope; supersedes 0003's mechanism)
 - 0009 — First-class control procedures (`apply` / `eval` / `load`)
 - 0010 — Current ports as parameters
+- 0011 — Error diagnostics: source locations and backtraces
 
 ADR 0001 is the load-bearing one: it explains why the evaluator is a step-loop with continuation frames rather than recursive `eval` calls, and why that choice makes TCO and `call/cc` cheap.
 
@@ -235,7 +237,7 @@ ADR 0001 is the load-bearing one: it explains why the evaluator is a step-loop w
 cargo test
 ```
 
-That runs about **670 tests across ~45 files** in a few seconds (the slow SRFI 132 sort suite is `#[ignore]`d — run it with `-- --ignored`). The suite covers each module's unit tests, end-to-end integration tests (evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters), the in-house R7RS conformance corpus, and the R7RS-large reference-suite harness described below.
+That runs about **676 tests across ~46 files** in a few seconds (the slow SRFI 132 sort suite is `#[ignore]`d — run it with `-- --ignored`). The suite covers each module's unit tests, end-to-end integration tests (evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters), the in-house R7RS conformance corpus, and the R7RS-large reference-suite harness described below.
 
 ### R7RS-large reference suites
 

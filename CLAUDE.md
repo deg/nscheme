@@ -64,7 +64,7 @@ single binary, no bytecode VM. See `README.md` for the user-facing overview,
 cargo build                         # debug binary at target/debug/nscheme
 cargo build --release               # optimized binary at target/release/nscheme
 
-cargo test                          # full suite (~670 tests; SRFI 132 sort is #[ignore]d)
+cargo test                          # full suite (~676 tests; SRFI 132 sort is #[ignore]d)
 cargo test --test conformance       # R7RS-large upstream SRFI reference suites
 cargo test --test conformance -- --ignored   # also the ~2-min sort suite
 cargo test --test r7rs_chibi -- --nocapture  # chibi R7RS-small corpus (1180 forms / 1225 assertions)
