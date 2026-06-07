@@ -124,3 +124,32 @@ fn error_object_predicate() {
     ";
     assert!(equal(&run(src).unwrap(), &Value::Bool(true)));
 }
+
+#[test]
+fn user_records_serve_as_typed_conditions() {
+    // R7RS idiom for typed errors (bead nscheme-1o2): raise a record and
+    // dispatch on its predicate in guard. Distinct record types are
+    // distinguishable, and the built-in error-object is separate.
+    let src = "
+      (define-record-type app-error
+        (make-app-error message code) app-error?
+        (message app-error-message) (code app-error-code))
+      (define-record-type config-error
+        (make-config-error key) config-error? (key config-error-key))
+      (define (classify thunk)
+        (guard (e ((app-error? e) (list 'app (app-error-code e)))
+                  ((config-error? e) (list 'config (config-error-key e)))
+                  ((error-object? e) (list 'builtin (error-object-message e)))
+                  (else (list 'other)))
+          (thunk)))
+      (list (classify (lambda () (raise (make-app-error \"nf\" 404))))
+            (classify (lambda () (raise (make-config-error 'db))))
+            (classify (lambda () (error \"plain\" 1)))
+            (app-error? (make-config-error 'k)))";
+    let v = run(src).unwrap();
+    let expected = run(
+        "(list (list 'app 404) (list 'config 'db) (list 'builtin \"plain\") #f)",
+    )
+    .unwrap();
+    assert!(equal(&v, &expected), "got {v:?}");
+}
