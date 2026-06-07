@@ -164,3 +164,69 @@ fn case_arm_body_tail() {
                (loop 50000)";
     assert!(equal(&run(src).unwrap(), &done()));
 }
+
+// --- Additional §3.5 positions (bead nscheme-8g2 audit) ---
+
+#[test]
+fn tail_in_unless_body() {
+    // Last expression of an unless body is a tail position.
+    let src = "(define (loop n) (unless (= n 0) (loop (- n 1))))
+               (loop 100000) 'done";
+    assert!(equal(&run(src).unwrap(), &done()));
+}
+
+#[test]
+fn tail_in_cond_arrow_clause() {
+    // The receiver in a `(test => proc)` clause is called in tail position.
+    let src = "(define (loop n)
+                 (cond ((= n 0) 'done)
+                       ((- n 1) => loop)))
+               (loop 100000)";
+    assert!(equal(&run(src).unwrap(), &done()));
+}
+
+#[test]
+fn tail_in_cond_else_clause() {
+    let src = "(define (loop n)
+                 (cond ((= n 0) 'done)
+                       (else (loop (- n 1)))))
+               (loop 100000)";
+    assert!(equal(&run(src).unwrap(), &done()));
+}
+
+#[test]
+fn tail_in_case_else_arrow() {
+    let src = "(define (loop n)
+                 (case (= n 0)
+                   ((#t) 'done)
+                   (else => (lambda (_) (loop (- n 1))))))
+               (loop 100000)";
+    assert!(equal(&run(src).unwrap(), &done()));
+}
+
+#[test]
+fn tail_in_let_values_body() {
+    let src = "(define (loop n)
+                 (let-values (((a) (values n)))
+                   (if (= a 0) 'done (loop (- a 1)))))
+               (loop 100000)";
+    assert!(equal(&run(src).unwrap(), &done()));
+}
+
+#[test]
+fn tail_in_let_star_values_body() {
+    let src = "(define (loop n)
+                 (let*-values (((a) (values n)) ((b) (values a)))
+                   (if (= b 0) 'done (loop (- b 1)))))
+               (loop 100000)";
+    assert!(equal(&run(src).unwrap(), &done()));
+}
+
+#[test]
+fn tail_in_letrec_star_body() {
+    let src = "(define (loop n)
+                 (letrec* ((x 1))
+                   (if (= n 0) 'done (loop (- n x)))))
+               (loop 100000)";
+    assert!(equal(&run(src).unwrap(), &done()));
+}
