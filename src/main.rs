@@ -80,6 +80,22 @@ fn print_usage() {
     eprintln!("    nscheme -h, --help   show this message");
 }
 
+/// Print an evaluation error to stderr, adding a source location
+/// (`line:col` + caret) for parse/lex errors, which carry a span into
+/// `source` (bead nscheme-tn3).
+fn report_error(source: &str, e: &EvalError) {
+    if let EvalError::Parse(pe) = e
+        && let Some(span) = pe.span()
+    {
+        let loc = nscheme::diagnostic::locate(source, span);
+        if !loc.is_empty() {
+            eprintln!("error: {pe}\n{loc}");
+            return;
+        }
+    }
+    eprintln!("error: {e}");
+}
+
 fn run_expr(env: &EnvRef, source: &str) -> ExitCode {
     match eval_source(source, env.clone()) {
         Ok(v) => {
@@ -87,7 +103,7 @@ fn run_expr(env: &EnvRef, source: &str) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            report_error(source, &e);
             ExitCode::from(1)
         }
     }
@@ -102,7 +118,7 @@ fn run_file(env: &EnvRef, path: &Path) -> ExitCode {
         }
     };
     if let Err(e) = eval_source(&source, env.clone()) {
-        eprintln!("error: {e}");
+        report_error(&source, &e);
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
@@ -157,7 +173,7 @@ fn run_repl(env: &EnvRef) -> ExitCode {
             ReadOutcome::Input(source) => match eval_source(&source, env.clone()) {
                 Ok(Value::Unspecified) => {}
                 Ok(v) => print_value(&v),
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => report_error(&source, &e),
             },
         }
     }

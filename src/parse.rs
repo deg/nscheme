@@ -79,6 +79,26 @@ pub enum ParseError {
     Lex(#[from] crate::lex::LexError),
 }
 
+impl ParseError {
+    /// The source span this error points at, if it has one (the
+    /// end-of-input error has no specific location).
+    #[must_use]
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            Self::UnexpectedEof => None,
+            Self::UnexpectedRParen { span }
+            | Self::UnexpectedDot { span }
+            | Self::UnclosedList { span }
+            | Self::BadDottedTail { span }
+            | Self::BadBytevectorElement { span }
+            | Self::InvalidNumber { span, .. }
+            | Self::UndefinedDatumLabel { span, .. }
+            | Self::DuplicateDatumLabel { span, .. } => Some(*span),
+            Self::Lex(e) => Some(e.span()),
+        }
+    }
+}
+
 /// Parse a full program: zero or more top-level datums.
 pub fn parse_program(source: &str) -> Result<Vec<Value>, ParseError> {
     let tokens = tokenize(source)?;

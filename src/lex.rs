@@ -183,6 +183,25 @@ pub enum LexError {
     ConflictingNumberPrefix { span: Span },
 }
 
+impl LexError {
+    /// The source span this lexical error points at.
+    #[must_use]
+    pub fn span(&self) -> Span {
+        match self {
+            Self::UnexpectedChar { span, .. }
+            | Self::UnterminatedString { span }
+            | Self::UnterminatedBlockComment { span }
+            | Self::UnterminatedQuotedIdentifier { span }
+            | Self::InvalidEscape { span }
+            | Self::InvalidHexScalar { span }
+            | Self::InvalidCharacter { span }
+            | Self::InvalidHashSyntax { span }
+            | Self::UnknownDirective { span, .. }
+            | Self::ConflictingNumberPrefix { span } => *span,
+        }
+    }
+}
+
 /// Tokenize an entire source string.
 pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
     let mut lexer = Lexer::new(input);

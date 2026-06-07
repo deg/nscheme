@@ -34,6 +34,7 @@
 
 pub mod builtins;
 mod casefold_table;
+pub mod diagnostic;
 pub mod env;
 pub mod eval;
 pub mod io;
