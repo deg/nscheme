@@ -187,7 +187,7 @@ Currently working:
 
 - Full numeric tower (`i64` / arbitrary-precision `BigInt` / exact `BigRational` / `f64` / `Complex`) with R7RS exact/inexact promotion; complex literals (`1+2i`) parse and evaluate
 - String / char / symbol / vector / bytevector operations with Unicode-aware string indexing
-- Textual ports (string and file), `display` / `write` / `read-char` / datum `read`, `eof-object`, `call-with-output-file` / `call-with-input-file`
+- Textual ports (string and file), `display` / `write` / `read-char` / datum `read`, `eof-object`, `call-with-port`, `call-with-output-file` / `call-with-input-file`; `parameterize`-able `current-output-port` / `current-input-port` with the redirection family (`with-output-to-file`, `with-input-from-file`, `with-output-to-string`, `with-input-from-string`)
 - Hygienic `syntax-rules` (scope-based) — `define-syntax`, `let-syntax`, `letrec-syntax`
 - `define-library`, `import` (with `only` / `except` / `prefix` / `rename`), `cond-expand`, and a **filesystem loader** that finds `(import (foo bar))` on disk as `foo/bar.sld` (search path: `NSCHEME_LIB_PATH` → compiled-in default → `./lib`)
 - `call/cc`, `call-with-current-continuation`, `dynamic-wind`, `apply`
@@ -206,10 +206,9 @@ Tracked in the `bd` issue tracker, with deeper detail in [`docs/`](docs/):
 
 - Hygiene is scope-based and passes the canonical tests, but the full sets-of-scopes algorithm is not yet complete (`nscheme-d6o`)
 - Environments aren't reified: `eval`'s environment argument and `null-environment`/`scheme-report-environment` all resolve to the interaction environment
-- Port redirection (`with-output-to-file`, `with-input-from-file`) is missing — the current ports aren't yet parameters (`nscheme-oge`)
 - No source locations / backtraces on raised errors yet (`nscheme-tn3`)
 - Performance: it's a tree-walking interpreter with no bytecode VM, so heavy loops are slow (`nscheme-6mp`)
-- Smaller reader / error-category refinements (`nscheme-9gy`, `nscheme-1o2`)
+- User-defined error categories beyond `read-error?` / `file-error?` (`nscheme-1o2`)
 
 ## Design
 

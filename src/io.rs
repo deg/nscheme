@@ -62,38 +62,113 @@
 
 use std::cell::RefCell;
 use std::fs;
-use std::io::Read as _;
 use std::io::Write as _;
 use std::rc::Rc;
 
 use crate::builtins::value_to_usize;
 use crate::env::EnvRef;
-use crate::value::{Arity, Port, PrimitiveFn, Procedure, RuntimeError, Symbol, Value};
+use crate::value::{Arity, ParameterCell, Port, PrimitiveFn, Procedure, RuntimeError, Symbol, Value};
+
+/// The three current-port parameter cells, plus the canonical stdio port
+/// objects, shared across every `install_base` on this thread. They must
+/// be singletons (like `PRIMITIVE_CACHE` in builtins): `parameterize`
+/// rebinds the cell that `current-output-port` names, and the I/O
+/// primitives read that *same* cell for their default port — so
+/// redirection (`with-output-to-file`, …) works.
+struct CurrentPorts {
+    stdin: Value,
+    stdout: Value,
+    stderr: Value,
+    input: Rc<ParameterCell>,
+    output: Rc<ParameterCell>,
+    error: Rc<ParameterCell>,
+}
+
+thread_local! {
+    static CURRENT_PORTS: RefCell<Option<CurrentPorts>> = const { RefCell::new(None) };
+}
+
+/// Initialize the current-port singletons on first use and run `f` over
+/// them. The cells start out holding the real stdio ports.
+fn with_current_ports<T>(f: impl FnOnce(&CurrentPorts) -> T) -> T {
+    CURRENT_PORTS.with(|slot| {
+        if slot.borrow().is_none() {
+            let stdin = Value::Port(Rc::new(RefCell::new(Port::StdIn {
+                buffer: String::new(),
+                pos: 0,
+            })));
+            let stdout = Value::Port(Rc::new(RefCell::new(Port::StdOut)));
+            let stderr = Value::Port(Rc::new(RefCell::new(Port::StdErr)));
+            let mk = |v: &Value| {
+                Rc::new(ParameterCell {
+                    value: RefCell::new(v.clone()),
+                })
+            };
+            let ports = CurrentPorts {
+                input: mk(&stdin),
+                output: mk(&stdout),
+                error: mk(&stderr),
+                stdin,
+                stdout,
+                stderr,
+            };
+            *slot.borrow_mut() = Some(ports);
+        }
+        f(slot.borrow().as_ref().expect("current ports initialized"))
+    })
+}
+
+/// The current default output / input port values (what `display` with no
+/// port writes to, what `read-char` with no port reads from), honoring any
+/// active `parameterize` on `current-output-port` / `current-input-port`.
+fn current_output_value() -> Value {
+    with_current_ports(|p| p.output.value.borrow().clone())
+}
+fn current_input_value() -> Value {
+    with_current_ports(|p| p.input.value.borrow().clone())
+}
+
+/// The current-input-port as a borrowable port, for the no-argument forms
+/// of `read` / `read-char` / `read-line` / `peek-char`.
+fn current_input_port() -> Result<Rc<RefCell<Port>>, RuntimeError> {
+    match current_input_value() {
+        Value::Port(p) => Ok(p),
+        other => Err(type_err("input port", &other)),
+    }
+}
+
+/// `char-ready?` / `u8-ready?`: validate the optional port (defaulting to
+/// current-input-port) is an input port, then report ready. We have no
+/// non-blocking I/O and our string/file ports never block, so a read is
+/// always "ready" (R7RS permits this).
+fn ready_on_input_port(port: Option<&Value>) -> Result<Value, RuntimeError> {
+    let v = match port {
+        Some(v) => v.clone(),
+        None => current_input_value(),
+    };
+    match &v {
+        Value::Port(p) if p.borrow().is_input() => Ok(Value::Bool(true)),
+        other => Err(type_err("input port", other)),
+    }
+}
 
 /// Install the I/O primitives plus the three current-port parameters.
 pub fn install_io(env: &EnvRef) {
-    let stdin = Value::Port(Rc::new(RefCell::new(Port::StdIn {
-        buffer: String::new(),
-        pos: 0,
-    })));
-    let stdout = Value::Port(Rc::new(RefCell::new(Port::StdOut)));
-    let stderr = Value::Port(Rc::new(RefCell::new(Port::StdErr)));
-
-    // Store the canonical ports in the env so the (current-*-port)
-    // procedures can return the same value each time.
-    env.define(Symbol::intern("$stdin"), stdin);
-    env.define(Symbol::intern("$stdout"), stdout);
-    env.define(Symbol::intern("$stderr"), stderr);
-
-    define_prim(env, "current-input-port", Arity::Exact(0), |args| {
-        let _ = args;
-        // Resolved at call time via env lookup.
-        Err(RuntimeError::Other(
-            "current-input-port resolved via Scheme wrapper; see bootstrap".into(),
-        ))
+    // Bind the canonical stdio ports and the three current-port
+    // *parameters* (R7RS §6.13.3). They are `parameterize`-able, and the
+    // I/O primitives below read their current values for the default
+    // port, which is what makes `with-output-to-file` and friends work.
+    with_current_ports(|p| {
+        env.define(Symbol::intern("$stdin"), p.stdin.clone());
+        env.define(Symbol::intern("$stdout"), p.stdout.clone());
+        env.define(Symbol::intern("$stderr"), p.stderr.clone());
+        let param = |cell: &Rc<ParameterCell>| {
+            Value::Procedure(Rc::new(Procedure::Parameter { cell: cell.clone() }))
+        };
+        env.define(Symbol::intern("current-input-port"), param(&p.input));
+        env.define(Symbol::intern("current-output-port"), param(&p.output));
+        env.define(Symbol::intern("current-error-port"), param(&p.error));
     });
-    // We instead define the three current-* procedures in the bootstrap
-    // string below where lookup is straightforward.
 
     define_prim(env, "input-port?", Arity::Exact(1), |a| match &a[0] {
         Value::Port(p) => Ok(Value::Bool(p.borrow().is_input())),
@@ -252,9 +327,11 @@ pub fn install_io(env: &EnvRef) {
         let b = n as u8;
         write_to_port(a.get(1), &(b as char).to_string())
     });
-    define_prim(env, "u8-ready?", Arity::Range { min: 0, max: 1 }, |_| {
-        // Conservatively report ready — we don't have non-blocking I/O.
-        Ok(Value::Bool(true))
+    define_prim(env, "u8-ready?", Arity::Range { min: 0, max: 1 }, |a| {
+        // Validate the (optional) port, defaulting to current-input-port;
+        // then conservatively report ready (we have no non-blocking I/O,
+        // and our string/file ports never block).
+        ready_on_input_port(a.first())
     });
     // R7RS `write-bytevector bv [port [start [end]]]`: write the raw
     // bytes of `bv[start..end]` to a binary output port (interpreted
@@ -291,8 +368,8 @@ pub fn install_io(env: &EnvRef) {
             write_to_port(a.get(1), &s)
         },
     );
-    define_prim(env, "char-ready?", Arity::Range { min: 0, max: 1 }, |_| {
-        Ok(Value::Bool(true))
+    define_prim(env, "char-ready?", Arity::Range { min: 0, max: 1 }, |a| {
+        ready_on_input_port(a.first())
     });
     define_prim(env, "get-output-string", Arity::Exact(1), |a| match &a[0] {
         Value::Port(p) => match &*p.borrow() {
@@ -362,9 +439,7 @@ pub fn install_io(env: &EnvRef) {
 
     define_prim(env, "read", Arity::Range { min: 0, max: 1 }, |a| {
         match a.first() {
-            None => Err(RuntimeError::Other(
-                "read on stdin not yet supported".into(),
-            )),
+            None => read_datum_from_port(&mut current_input_port()?.borrow_mut()),
             Some(Value::Port(p)) => {
                 let mut port = p.borrow_mut();
                 read_datum_from_port(&mut port)
@@ -373,9 +448,9 @@ pub fn install_io(env: &EnvRef) {
         }
     });
     define_prim(env, "read-char", Arity::Range { min: 0, max: 1 }, |a| {
-        // Default to stdin if no port given.
+        // Default to the current-input-port if no port given.
         match a.first() {
-            None => read_char_from_stdin(),
+            None => read_char_from_port(&mut current_input_port()?.borrow_mut()),
             Some(Value::Port(p)) => read_char_from_port(&mut p.borrow_mut()),
             Some(other) => Err(type_err("port", other)),
         }
@@ -385,7 +460,7 @@ pub fn install_io(env: &EnvRef) {
         "peek-char",
         Arity::Range { min: 0, max: 1 },
         |a| match a.first() {
-            None => peek_char_from_stdin(),
+            None => peek_char_from_port(&current_input_port()?.borrow()),
             Some(Value::Port(p)) => peek_char_from_port(&p.borrow()),
             Some(other) => Err(type_err("port", other)),
         },
@@ -395,7 +470,7 @@ pub fn install_io(env: &EnvRef) {
         "read-line",
         Arity::Range { min: 0, max: 1 },
         |a| match a.first() {
-            None => read_line_from_stdin(),
+            None => read_line_from_port(&mut current_input_port()?.borrow_mut()),
             Some(Value::Port(p)) => read_line_from_port(&mut p.borrow_mut()),
             Some(other) => Err(type_err("port", other)),
         },
@@ -611,12 +686,11 @@ fn type_err(expected: &str, got: &Value) -> RuntimeError {
 /// `None` or is `Unspecified`).
 fn write_to_port(port: Option<&Value>, s: &str) -> Result<Value, RuntimeError> {
     match port {
+        // No explicit port: write to the current-output-port parameter's
+        // value (a string port during `with-output-to-string`, etc.).
         None => {
-            print!("{s}");
-            std::io::stdout()
-                .flush()
-                .map_err(|e| RuntimeError::Other(format!("flush: {e}")))?;
-            Ok(Value::Unspecified)
+            let cur = current_output_value();
+            write_to_port(Some(&cur), s)
         }
         Some(Value::Port(p)) => {
             let mut port = p.borrow_mut();
@@ -761,47 +835,11 @@ fn read_line_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
     }
 }
 
-fn read_char_from_stdin() -> Result<Value, RuntimeError> {
-    let mut byte = [0u8; 1];
-    let n = std::io::stdin()
-        .read(&mut byte)
-        .map_err(|e| RuntimeError::Other(format!("read-char: {e}")))?;
-    if n == 0 {
-        Ok(Value::Eof)
-    } else {
-        // For ASCII this is fine; full UTF-8 from stdin is rare and
-        // would need a more involved read loop.
-        Ok(Value::Char(byte[0] as char))
-    }
-}
 
-fn peek_char_from_stdin() -> Result<Value, RuntimeError> {
-    Err(RuntimeError::Other(
-        "peek-char on stdin is not supported in v1".into(),
-    ))
-}
-
-fn read_line_from_stdin() -> Result<Value, RuntimeError> {
-    let mut buf = String::new();
-    let n = std::io::stdin()
-        .read_line(&mut buf)
-        .map_err(|e| RuntimeError::Other(format!("read-line: {e}")))?;
-    if n == 0 {
-        Ok(Value::Eof)
-    } else {
-        while matches!(buf.chars().last(), Some('\n' | '\r')) {
-            buf.pop();
-        }
-        Ok(Value::string(buf))
-    }
-}
-
-/// Source for the `(current-*-port)` procedures, defined in Scheme so
-/// they don't need access to the env from inside a primitive.
+/// Scheme-level port helpers. The `current-*-port` accessors are now
+/// real parameters (installed in `install_io`), so redirection works:
+/// `with-output-to-file` etc. just `parameterize` them.
 pub const CURRENT_PORTS_BOOTSTRAP: &str = "
-(define (current-input-port)  $stdin)
-(define (current-output-port) $stdout)
-(define (current-error-port)  $stderr)
 (define (call-with-output-file fname proc)
   (let* ((port (open-output-file fname))
          (result (proc port)))
@@ -820,4 +858,18 @@ pub const CURRENT_PORTS_BOOTSTRAP: &str = "
     (lambda results
       (close-port port)
       (apply values results))))
+(define (with-output-to-file fname thunk)
+  (call-with-output-file fname
+    (lambda (port)
+      (parameterize ((current-output-port port)) (thunk)))))
+(define (with-input-from-file fname thunk)
+  (call-with-input-file fname
+    (lambda (port)
+      (parameterize ((current-input-port port)) (thunk)))))
+(define (with-output-to-string thunk)
+  (let ((port (open-output-string)))
+    (parameterize ((current-output-port port)) (thunk))
+    (get-output-string port)))
+(define (with-input-from-string str thunk)
+  (parameterize ((current-input-port (open-input-string str))) (thunk)))
 ";
