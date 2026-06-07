@@ -812,4 +812,12 @@ pub const CURRENT_PORTS_BOOTSTRAP: &str = "
          (result (proc port)))
     (close-port port)
     result))
+(define (call-with-port port proc)
+  ; R7RS §6.13.1: call proc with port; on normal return, close the port
+  ; and yield proc's values. Preserve multiple values.
+  (call-with-values
+    (lambda () (proc port))
+    (lambda results
+      (close-port port)
+      (apply values results))))
 ";

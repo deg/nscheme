@@ -162,3 +162,29 @@ fn file_exists_then_delete() {
     let v = run(&format!("(file-exists? \"{path_str}\")")).unwrap();
     assert!(equal(&v, &Value::Bool(false)));
 }
+
+#[test]
+fn call_with_port_returns_value_and_closes_port() {
+    // Returns the proc's value (bead nscheme-488 / R7RS §6.13.1).
+    let v = run("(call-with-port (open-input-string \"42\") (lambda (p) (read p)))").unwrap();
+    assert!(equal(&v, &Value::Int(42)));
+
+    // Closes the port after the proc returns.
+    let closed = run("(define s (open-output-string))
+         (call-with-port s (lambda (p) (write-char #\\a p)))
+         (output-port-open? s)")
+    .unwrap();
+    assert!(equal(&closed, &Value::Bool(false)));
+}
+
+#[test]
+fn call_with_port_preserves_multiple_values() {
+    let v = run("(call-with-values
+           (lambda () (call-with-port (open-input-string \"x\") (lambda (p) (values 1 2 3))))
+           list)")
+    .unwrap();
+    assert!(equal(
+        &v,
+        &Value::list_from(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+    ));
+}
