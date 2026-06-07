@@ -33,6 +33,7 @@
 //! `docs/0001-…06-…md` for the architecture decision records.
 
 pub mod builtins;
+mod casefold_table;
 pub mod env;
 pub mod eval;
 pub mod io;

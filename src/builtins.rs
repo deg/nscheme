@@ -229,28 +229,32 @@ fn is_value_inexact(v: &Value) -> bool {
     matches!(v, Value::Float(_))
 }
 
-/// R7RS-style Unicode case folding. Rust's `to_lowercase` handles
-/// most one-to-one cases; this helper layers on the well-known
-/// one-to-many foldings that the chibi corpus exercises:
-///
-/// - U+00DF (`ß`) → "ss"
-/// - U+017F (`ſ`, Latin long-s) → "s"
-/// - U+03C2 (`ς`, Greek final sigma) → "σ"
-///
-/// We post-process the `to_lowercase` output rather than running our
-/// own per-codepoint table because Rust already implements the
-/// bulk of the simple mappings.
+/// R7RS *full* case folding (`string-foldcase`, §6.7): apply the Unicode
+/// CaseFolding.txt full mapping (statuses C+F) per code point. A code
+/// point with no entry folds to itself (e.g. `ß` → "ss", `ﬀ` → "ff").
+/// The table is generated from the Unicode UCD — see
+/// [`crate::casefold_table`] (bead nscheme-vfp).
 fn case_fold(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for c in s.to_lowercase().chars() {
-        match c {
-            'ß' => out.push_str("ss"),
-            'ſ' => out.push('s'),
-            'ς' => out.push('σ'),
-            other => out.push(other),
+    for c in s.chars() {
+        match crate::casefold_table::FULL.binary_search_by(|(k, _)| k.cmp(&c)) {
+            Ok(i) => out.push_str(crate::casefold_table::FULL[i].1),
+            Err(_) => out.push(c),
         }
     }
     out
+}
+
+/// R7RS *simple* case folding (`char-foldcase`, §6.6): the one-to-one
+/// CaseFolding.txt mapping (statuses C+S). Characters whose full folding
+/// is multi-character (e.g. `ß`) keep their simple folding (here, no
+/// change), so the result is always a single character. Identity for
+/// code points with no entry.
+fn simple_fold(c: char) -> char {
+    match crate::casefold_table::SIMPLE.binary_search_by(|(k, _)| k.cmp(&c)) {
+        Ok(i) => crate::casefold_table::SIMPLE[i].1,
+        Err(_) => c,
+    }
 }
 
 /// Simplest rational in [lo, hi] (inclusive). Uses the standard
@@ -2031,25 +2035,26 @@ fn install_chars(env: &EnvRef) {
         other => Err(type_err("char", other)),
     });
     define(env, "char-foldcase", Arity::Exact(1), |a| match &a[0] {
-        // R7RS char-foldcase ≈ lowercase for the ASCII/Latin1 subset.
-        Value::Char(c) => Ok(Value::Char(c.to_lowercase().next().unwrap_or(*c))),
+        // R7RS char-foldcase: Unicode *simple* case folding (§6.6).
+        Value::Char(c) => Ok(Value::Char(simple_fold(*c))),
         other => Err(type_err("char", other)),
     });
-    // Case-insensitive char comparisons.
+    // Case-insensitive char comparisons — R7RS defines these via
+    // char-foldcase, i.e. simple case folding.
     define(env, "char-ci=?", Arity::AtLeast(2), |a| {
-        char_chain(a, |x, y| x.eq_ignore_ascii_case(&y))
+        char_chain(a, |x, y| simple_fold(x) == simple_fold(y))
     });
     define(env, "char-ci<?", Arity::AtLeast(2), |a| {
-        char_chain(a, |x, y| x.to_lowercase().next() < y.to_lowercase().next())
+        char_chain(a, |x, y| simple_fold(x) < simple_fold(y))
     });
     define(env, "char-ci>?", Arity::AtLeast(2), |a| {
-        char_chain(a, |x, y| x.to_lowercase().next() > y.to_lowercase().next())
+        char_chain(a, |x, y| simple_fold(x) > simple_fold(y))
     });
     define(env, "char-ci<=?", Arity::AtLeast(2), |a| {
-        char_chain(a, |x, y| x.to_lowercase().next() <= y.to_lowercase().next())
+        char_chain(a, |x, y| simple_fold(x) <= simple_fold(y))
     });
     define(env, "char-ci>=?", Arity::AtLeast(2), |a| {
-        char_chain(a, |x, y| x.to_lowercase().next() >= y.to_lowercase().next())
+        char_chain(a, |x, y| simple_fold(x) >= simple_fold(y))
     });
     // Comparison ops.
     define(env, "char=?", Arity::AtLeast(2), |a| {
