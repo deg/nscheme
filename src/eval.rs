@@ -225,14 +225,6 @@ pub enum Frame {
     /// `(or e1 … en)` — short-circuit OR. The currently-evaluating
     /// expression is non-last.
     OrNext { remaining: Vec<Value>, env: EnvRef },
-    /// `(apply proc a1 ... arglist)` — evaluating arg expressions.
-    /// `evaluated[0]` is the proc once it has been evaluated. The
-    /// last evaluated arg is spread when remaining becomes empty.
-    ApplySpread {
-        evaluated: Vec<Value>,
-        remaining: Vec<Value>,
-        env: EnvRef,
-    },
     /// An exception handler installed by `with-exception-handler`.
     /// When a `Step::Raise(v, _)` propagates up, the handler is
     /// invoked with `v`. Whether the handler's return value is
@@ -247,10 +239,6 @@ pub enum Frame {
     /// `raise-continuable` finishes evaluating, this frame fires
     /// `Step::Raise(value, continuable)`.
     RaiseAfter { continuable: bool },
-    /// `(eval datum env-spec)` post-evaluation step: when the
-    /// expression argument finishes evaluating (giving us a *datum*),
-    /// re-evaluate that datum as code in the captured env.
-    EvalAfter { env: EnvRef },
     /// Helper for `with-exception-handler`: when the handler
     /// expression has finished evaluating, install it as an
     /// `ExceptionHandler` frame and call the thunk.
@@ -629,15 +617,12 @@ fn is_special_form_name(name: &str) -> bool {
             | "cond-expand"
             | "call/cc"
             | "call-with-current-continuation"
-            | "apply"
             | "delay"
             | "delay-force"
             | "lazy"
             | "case-lambda"
             | "define-values"
             | "define-record-type"
-            | "eval"
-            | "load"
             | "let-values"
             | "let*-values"
             | "parameterize"
@@ -684,13 +669,10 @@ fn dispatch_special_form(
         "import" => step_import(tail, env),
         "cond-expand" => step_cond_expand(tail, env, frames),
         "call/cc" | "call-with-current-continuation" => step_call_cc(tail, env, frames),
-        "apply" => step_apply_form(tail, env, frames),
         "delay" | "delay-force" | "lazy" => step_delay(tail, env),
         "case-lambda" => step_case_lambda(tail, env),
         "define-values" => step_define_values(tail, env),
         "define-record-type" => step_define_record_type(tail, env),
-        "eval" => step_eval_form(tail, env, frames),
-        "load" => step_load(tail, env),
         "let-values" => step_let_values(tail, env, frames, false),
         "let*-values" => step_let_values(tail, env, frames, true),
         "parameterize" => step_parameterize(tail, env, frames),
@@ -1032,35 +1014,6 @@ fn resolve_base_library(form: &Value) -> Result<HashMap<Symbol, crate::env::Cell
 /// `(apply proc a1 a2 ... arglist)` — spreads `arglist` as the trailing
 /// arguments and applies `proc`. Implemented as a special form so we
 /// don't need a primitive-side trampoline.
-fn step_apply_form(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
-    let items = collect_list(&tail)
-        .map_err(|()| EvalError::malformed("apply", "argument list must be proper"))?;
-    // R7RS §6.10: apply takes a procedure plus at least one
-    // argument-list (`(apply proc args...)` with args... non-empty).
-    // `(apply proc)` is an arity error, raised as a catchable
-    // exception so `(guard …)` and `(test-error …)` see it.
-    if items.len() < 2 {
-        return Ok(Step::Raise(
-            runtime_error_to_value(RuntimeError::Arity {
-                procedure: "apply".into(),
-                expected: "at least 2".into(),
-                got: items.len(),
-            }),
-            /*continuable=*/ false,
-        ));
-    }
-    let proc_expr = items[0].clone();
-    let inner_args = items[1..].to_vec();
-    // Push an ApplySpread frame that will, after evaluating the proc
-    // and each arg, treat the last evaluated arg as the spread list.
-    frames.push(Frame::ApplySpread {
-        evaluated: Vec::new(),
-        remaining: inner_args,
-        env: env.clone(),
-    });
-    Ok(Step::Eval(proc_expr, env))
-}
-
 /// `(parameterize ((param value) ...) body...)` — dynamically rebind
 /// each `param` to `value` for the dynamic extent of `body`. Uses
 /// synchronous evaluation for the binding expressions (the typical
@@ -1339,73 +1292,6 @@ fn step_define_record_type(tail: Value, env: EnvRef) -> Result<Step, EvalError> 
     Ok(Step::Return(Value::Unspecified))
 }
 
-/// `(eval datum env-spec)` — evaluate `datum` in the env identified
-/// by `env-spec` (an `(environment ...)` spec or just `#t` for the
-/// global env in this v1).
-///
-/// In nscheme v1 the env-spec argument is largely ignored: we always
-/// evaluate against the current call-site env. Proper R7RS semantics
-/// would distinguish between (environment '(scheme base)), the
-/// interaction-environment, and so on. Documented limitation.
-fn step_eval_form(tail: Value, env: EnvRef, frames: &mut Vec<Frame>) -> Result<Step, EvalError> {
-    let parts = collect_list(&tail)
-        .map_err(|()| EvalError::malformed("eval", "expected (eval expr env-spec)"))?;
-    if parts.is_empty() {
-        return Err(EvalError::malformed(
-            "eval",
-            "expected at least one operand",
-        ));
-    }
-    // Evaluate the FIRST operand (the expression-as-data) and the
-    // optional env-spec; then re-evaluate the resulting datum.
-    let expr_to_eval = parts[0].clone();
-    let _env_spec = parts.get(1).cloned();
-    // Two-step: evaluate the data argument, then in the resume push
-    // the value as a new datum to evaluate. Use a small frame.
-    frames.push(Frame::EvalAfter { env: env.clone() });
-    Ok(Step::Eval(expr_to_eval, env))
-}
-
-/// `(load filename)` — read FILENAME and evaluate its forms in the
-/// *current* environment, so its definitions persist (this is the point
-/// of `load` at the REPL). FILENAME is evaluated and must yield a
-/// string. Relative paths resolve like `include`: against the directory
-/// of the file currently being loaded, else the working directory; a
-/// nested `load`/`include` inside the file then resolves relative to it.
-fn step_load(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
-    let parts = collect_list(&tail)
-        .map_err(|()| EvalError::malformed("load", "expected (load filename)"))?;
-    let [arg] = parts.as_slice() else {
-        return Err(EvalError::malformed(
-            "load",
-            "expected exactly one filename argument",
-        ));
-    };
-    // Evaluate the operand so `(load (string-append dir name))` works.
-    let path_val = eval(arg.clone(), env.clone())?;
-    let Value::String(s) = &path_val else {
-        return Err(EvalError::malformed(
-            "load",
-            "filename must evaluate to a string",
-        ));
-    };
-    let resolved = crate::library::resolve_include(&s.borrow());
-    let source = std::fs::read_to_string(&resolved)
-        .map_err(|e| EvalError::malformed("load", format!("read {}: {e}", resolved.display())))?;
-    let dir = resolved.parent().map_or_else(
-        || std::path::PathBuf::from("."),
-        std::path::Path::to_path_buf,
-    );
-    crate::library::push_load_dir(dir);
-    let result = eval_source(&source, env.clone());
-    crate::library::pop_load_dir();
-    result?;
-    Ok(Step::Return(Value::Unspecified))
-}
-
-/// `(define-values (formals) expr)` — evaluate `expr` (which must
-/// produce zero, one, or many values) and bind the resulting values
-/// to the names in `formals` in the current env.
 fn step_define_values(tail: Value, env: EnvRef) -> Result<Step, EvalError> {
     let (formals_form, rest) = tail
         .as_pair()
@@ -2980,6 +2866,107 @@ fn step_apply(
             });
             Ok(Step::Apply(before, vec![]))
         }
+        Procedure::Apply => {
+            // (apply proc arg1 ... arglist): the args are already
+            // evaluated (this is a procedure, not a special form), so we
+            // just splice the final list and re-dispatch. Returning
+            // Step::Apply keeps this a tail call.
+            if args.len() < 2 {
+                return Ok(Step::Raise(
+                    runtime_error_to_value(RuntimeError::Arity {
+                        procedure: "apply".into(),
+                        expected: "at least 2".into(),
+                        got: args.len(),
+                    }),
+                    false,
+                ));
+            }
+            let mut it = args.into_iter();
+            let proc = it.next().unwrap();
+            let mut combined: Vec<Value> = Vec::new();
+            let mut pending = it.next().unwrap();
+            // Everything between proc and the last argument is a plain
+            // argument; the final argument must be a proper list.
+            for next in it {
+                combined.push(pending);
+                pending = next;
+            }
+            match collect_list(&pending).ok() {
+                Some(tail) => combined.extend(tail),
+                None => {
+                    return Ok(Step::Raise(
+                        runtime_error_to_value(RuntimeError::Type {
+                            expected: "list (apply's last argument)".into(),
+                            got: pending.type_name().into(),
+                        }),
+                        false,
+                    ));
+                }
+            }
+            Ok(Step::Apply(proc, combined))
+        }
+        Procedure::Eval { env } => {
+            // (eval datum [env-spec]): evaluate the already-evaluated
+            // datum in the captured (interaction) environment. The
+            // env-spec is accepted but not reified (nscheme-iii / iii's
+            // env-reification is a separate concern).
+            if args.is_empty() || args.len() > 2 {
+                return Ok(Step::Raise(
+                    runtime_error_to_value(RuntimeError::Arity {
+                        procedure: "eval".into(),
+                        expected: "1 or 2".into(),
+                        got: args.len(),
+                    }),
+                    false,
+                ));
+            }
+            Ok(Step::Eval(args.into_iter().next().unwrap(), env.clone()))
+        }
+        Procedure::Load { env } => {
+            // (load filename): read the file and evaluate its forms in
+            // the captured environment, so its definitions persist.
+            if args.len() != 1 {
+                return Ok(Step::Raise(
+                    runtime_error_to_value(RuntimeError::Arity {
+                        procedure: "load".into(),
+                        expected: "exactly 1".into(),
+                        got: args.len(),
+                    }),
+                    false,
+                ));
+            }
+            let Value::String(s) = &args[0] else {
+                return Ok(Step::Raise(
+                    runtime_error_to_value(RuntimeError::Type {
+                        expected: "string (filename)".into(),
+                        got: args[0].type_name().into(),
+                    }),
+                    false,
+                ));
+            };
+            let resolved = crate::library::resolve_include(&s.borrow());
+            let source = match std::fs::read_to_string(&resolved) {
+                Ok(src) => src,
+                // A missing/unreadable file is a catchable R7RS condition.
+                Err(e) => {
+                    return Ok(Step::Raise(
+                        runtime_error_to_value(RuntimeError::Other(format!(
+                            "load: read {}: {e}",
+                            resolved.display()
+                        ))),
+                        false,
+                    ));
+                }
+            };
+            let dir = resolved
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("."), std::path::Path::to_path_buf);
+            crate::library::push_load_dir(dir);
+            let result = eval_source(&source, env.clone());
+            crate::library::pop_load_dir();
+            result?;
+            Ok(Step::Return(Value::Unspecified))
+        }
     }
 }
 
@@ -3159,13 +3146,6 @@ fn resume(frame: Frame, value: Value, frames: &mut Vec<Frame>) -> Result<Step, E
         }
         Frame::ReRaise => Ok(Step::Raise(value, false)),
         Frame::RaiseAfter { continuable } => Ok(Step::Raise(value, continuable)),
-        Frame::EvalAfter { env } => {
-            // `value` is the datum produced by evaluating eval's
-            // first argument; re-evaluate it as code in the captured
-            // env. No new frame: this is in tail position relative
-            // to the caller of `eval`.
-            Ok(Step::Eval(value, env))
-        }
         Frame::ParameterRestore { saved } => {
             // Body returned; restore the saved parameter values and
             // pass the body's value through.
@@ -3258,58 +3238,6 @@ fn resume(frame: Frame, value: Value, frames: &mut Vec<Frame>) -> Result<Step, E
             // Construct (thunk) as a call form.
             let call_form = Value::list_from([thunk_expr]);
             Ok(Step::Eval(call_form, env))
-        }
-        Frame::ApplySpread {
-            mut evaluated,
-            mut remaining,
-            env,
-        } => {
-            // First time we hit this frame, `value` is the procedure;
-            // subsequent times it's an arg. Push the just-arrived
-            // value onto `evaluated`.
-            evaluated.push(value);
-            if remaining.is_empty() {
-                // All exprs have been evaluated. evaluated[0] is the
-                // procedure; evaluated[1..n-1] are leading args;
-                // evaluated[n-1] is the list to spread.
-                let mut final_args: Vec<Value> = evaluated.iter().skip(1).cloned().collect();
-                // If there's nothing to spread (only proc), just apply
-                // to empty args.
-                if let Some(last) = final_args.pop() {
-                    // Walk the list and append its elements.
-                    let mut cur = last;
-                    loop {
-                        match cur {
-                            Value::Null => break,
-                            Value::Pair(p) => {
-                                let pair = p.borrow();
-                                final_args.push(pair.car.clone());
-                                cur = pair.cdr.clone();
-                            }
-                            _ => {
-                                // Runtime condition (not a compile-time
-                                // malformation): raise so handlers can
-                                // catch.
-                                return Ok(Step::Raise(
-                                    runtime_error_to_value(RuntimeError::Other(
-                                        "apply: last argument must be a proper list".into(),
-                                    )),
-                                    false,
-                                ));
-                            }
-                        }
-                    }
-                }
-                let proc = evaluated.into_iter().next().unwrap();
-                return Ok(Step::Apply(proc, final_args));
-            }
-            let next = remaining.remove(0);
-            frames.push(Frame::ApplySpread {
-                evaluated,
-                remaining,
-                env: env.clone(),
-            });
-            Ok(Step::Eval(next, env))
         }
     }
 }

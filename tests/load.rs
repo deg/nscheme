@@ -52,22 +52,15 @@ fn load_evaluates_its_filename_argument() {
 }
 
 #[test]
-fn load_missing_file_errors_cleanly() {
-    let err = run("(load \"/no/such/file-xyz.scm\")").unwrap_err();
-    match err {
-        EvalError::MalformedForm { form, .. } => assert_eq!(form, "load"),
-        other => panic!("expected a malformed `load` error, got {other:?}"),
-    }
+fn load_missing_file_is_a_catchable_error() {
+    // load is now a procedure (nscheme-iii); a missing file raises a
+    // catchable condition rather than aborting evaluation.
+    let v = run("(guard (e (#t 'caught)) (load \"/no/such/file-xyz.scm\"))").unwrap();
+    assert!(matches!(v, Value::Symbol(s) if s.name() == "caught"));
 }
 
 #[test]
-fn load_non_string_argument_errors() {
-    let err = run("(load 42)").unwrap_err();
-    match err {
-        EvalError::MalformedForm { form, message } => {
-            assert_eq!(form, "load");
-            assert!(message.contains("string"), "message was: {message}");
-        }
-        other => panic!("expected a malformed `load` error, got {other:?}"),
-    }
+fn load_non_string_argument_is_a_catchable_error() {
+    let v = run("(guard (e (#t 'caught)) (load 42))").unwrap();
+    assert!(matches!(v, Value::Symbol(s) if s.name() == "caught"));
 }

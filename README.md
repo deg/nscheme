@@ -179,7 +179,8 @@ Currently working:
 
 - Lexer + parser (including `[ ]` as a synonym for `( )`)
 - Evaluator with proper tail calls and lexical closures
-- Special forms: `quote`, `if`, `lambda`, `define`, `set!`, `begin`, `let`, `let*`, `letrec`/`letrec*`, named `let`, `cond` (with `=>` clauses), `case`, `and`/`or`, `when`/`unless`, `do`, `quasiquote`, `case-lambda`, `define-values`, `define-record-type`, `let-values`/`let*-values`, `parameterize`, `guard`, `delay`/`delay-force`, `eval`, `load`
+- Special forms: `quote`, `if`, `lambda`, `define`, `set!`, `begin`, `let`, `let*`, `letrec`/`letrec*`, named `let`, `cond` (with `=>` clauses), `case`, `and`/`or`, `when`/`unless`, `do`, `quasiquote`, `case-lambda`, `define-values`, `define-record-type`, `let-values`/`let*-values`, `parameterize`, `guard`, `delay`/`delay-force`
+- `apply`, `eval`, and `load` are first-class procedures (passable as values, e.g. `(map (lambda (e) (eval e env)) forms)`), not special forms
 - Base library: arithmetic with exact/inexact promotion, all the type predicates, equality (`eq?`/`eqv?`/`equal?`), list operations (`cons`, `car`, `cdr`, `length`, `reverse`, `append`, `list-ref`, `member`/`assoc` families), `map`, `for-each`
 
 ### Also implemented
@@ -203,11 +204,12 @@ Currently working:
 
 Tracked in the `bd` issue tracker, with deeper detail in [`docs/`](docs/):
 
-- `eval` is a special form, not yet a first-class procedure you can pass as a value (`nscheme-iii`)
-- Exact-complex arithmetic falls through to inexact — `1+2i` works but `(* 1+2i 1+2i)` is computed in floats (`nscheme-5mn`)
 - Hygiene is scope-based and passes the canonical tests, but the full sets-of-scopes algorithm is not yet complete (`nscheme-d6o`)
+- Environments aren't reified: `eval`'s environment argument and `null-environment`/`scheme-report-environment` all resolve to the interaction environment
+- Port redirection (`with-output-to-file`, `with-input-from-file`) is missing — the current ports aren't yet parameters (`nscheme-oge`)
+- No source locations / backtraces on raised errors yet (`nscheme-tn3`)
 - Performance: it's a tree-walking interpreter with no bytecode VM, so heavy loops are slow (`nscheme-6mp`)
-- Smaller reader / Unicode-case-folding / error-category refinements (`nscheme-9gy`, `nscheme-vfp`, `nscheme-1o2`)
+- Smaller reader / error-category refinements (`nscheme-9gy`, `nscheme-1o2`)
 
 ## Design
 

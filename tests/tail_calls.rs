@@ -230,3 +230,13 @@ fn tail_in_letrec_star_body() {
                (loop 100000)";
     assert!(equal(&run(src).unwrap(), &done()));
 }
+
+#[test]
+fn tail_through_first_class_apply() {
+    // apply is a procedure (nscheme-iii); a tail call routed through it
+    // must stay a tail call (regression guard for the special-form ->
+    // procedure conversion).
+    let src = "(define (loop n) (if (= n 0) 'done (apply loop (list (- n 1)))))
+               (loop 100000)";
+    assert!(equal(&run(src).unwrap(), &done()));
+}

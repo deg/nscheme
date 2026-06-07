@@ -376,6 +376,20 @@ pub enum Procedure {
     /// exposed as a bindable procedure; see
     /// `step_dynamic_wind` in the evaluator.
     DynamicWindStart,
+    /// First-class `apply` (R7RS §6.10). `step_apply` splices the final
+    /// argument list onto the leading args and re-dispatches, preserving
+    /// the tail call. A procedure (not a special form) so it can be
+    /// passed as a value — `(map (lambda (p) (apply + p)) …)`.
+    Apply,
+    /// First-class `eval` (R7RS §6.12). Evaluates its first argument (a
+    /// datum) in the captured environment. The optional env-specifier
+    /// argument is accepted but, since nscheme does not reify
+    /// environments, treated as the interaction environment.
+    Eval { env: EnvRef },
+    /// First-class `load` (R7RS §6.12). Reads the file named by its
+    /// string argument and evaluates its forms in the captured
+    /// environment.
+    Load { env: EnvRef },
 }
 
 /// One arity-arm of a `case-lambda` procedure.
@@ -405,6 +419,9 @@ impl Procedure {
             | Self::RecordAccessor { type_id, .. }
             | Self::RecordMutator { type_id, .. } => &type_id.name,
             Self::DynamicWindStart => "%dynamic-wind-apply",
+            Self::Apply => "apply",
+            Self::Eval { .. } => "eval",
+            Self::Load { .. } => "load",
         }
     }
 }
@@ -460,6 +477,9 @@ impl fmt::Debug for Procedure {
                 .field("field", field_index)
                 .finish(),
             Self::DynamicWindStart => f.write_str("%dynamic-wind-apply"),
+            Self::Apply => f.write_str("apply"),
+            Self::Eval { .. } => f.write_str("eval"),
+            Self::Load { .. } => f.write_str("load"),
         }
     }
 }

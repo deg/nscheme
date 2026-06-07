@@ -107,6 +107,22 @@ pub fn install_base(env: &EnvRef) -> Result<(), EvalError> {
         Symbol::intern("%dynamic-wind-apply"),
         Value::Procedure(Rc::new(Procedure::DynamicWindStart)),
     );
+    // First-class apply / eval / load (R7RS §6.10, §6.12) — real
+    // procedure values rather than special forms, so they can be passed
+    // around (nscheme-iii). eval/load capture this environment as their
+    // interaction environment.
+    env.define(
+        Symbol::intern("apply"),
+        Value::Procedure(Rc::new(Procedure::Apply)),
+    );
+    env.define(
+        Symbol::intern("eval"),
+        Value::Procedure(Rc::new(Procedure::Eval { env: env.clone() })),
+    );
+    env.define(
+        Symbol::intern("load"),
+        Value::Procedure(Rc::new(Procedure::Load { env: env.clone() })),
+    );
     eval_source(BOOTSTRAP, env.clone())?;
     eval_source(crate::io::CURRENT_PORTS_BOOTSTRAP, env.clone())?;
     Ok(())
