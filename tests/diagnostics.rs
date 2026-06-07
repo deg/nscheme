@@ -49,3 +49,34 @@ fn eof_error_has_no_span() {
         other => panic!("expected an unfinished-input error, got {other:?}"),
     }
 }
+
+// --- Stage 2: runtime call-chain backtrace ---
+
+use nscheme::builtins::install_base;
+use nscheme::env::Env;
+use nscheme::eval::{eval_source, take_backtrace};
+
+#[test]
+fn backtrace_records_pending_non_tail_calls() {
+    let env = Env::new_global();
+    install_base(&env).expect("install_base");
+    let _ = take_backtrace(); // clear any prior
+    let r = eval_source("(define (k a b) a) (k (+ 1 (bad)) 2)", env);
+    assert!(r.is_err());
+    // `bad` evaluates as an argument to `+`, itself an argument to `k`.
+    assert_eq!(take_backtrace(), vec!["+".to_string(), "k".to_string()]);
+}
+
+#[test]
+fn backtrace_is_short_for_tail_recursion() {
+    let env = Env::new_global();
+    install_base(&env).expect("install_base");
+    let _ = take_backtrace();
+    let r = eval_source(
+        "(define (loop n) (if (= n 0) (oops) (loop (- n 1)))) (loop 1000)",
+        env,
+    );
+    assert!(r.is_err());
+    // Tail calls leave no CallArg frame, so the trace is empty (TCO).
+    assert!(take_backtrace().is_empty());
+}

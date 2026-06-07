@@ -289,6 +289,49 @@ pub enum Frame {
 // Public entry points
 // ---------------------------------------------------------------------
 
+thread_local! {
+    /// Call-chain backtrace captured at the most recent error exit of
+    /// [`eval`] (bead nscheme-tn3). Innermost call first. The CLI reads
+    /// it via [`take_backtrace`] to annotate an error with "called from"
+    /// context. It's the pending non-tail call chain — tail calls leave
+    /// no `CallArg` frame, so deep tail recursion correctly yields a
+    /// short trace.
+    static BACKTRACE: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Take (and clear) the backtrace recorded by the last failed `eval`.
+/// Empty if the last evaluation succeeded or failed before any call.
+#[must_use]
+pub fn take_backtrace() -> Vec<String> {
+    BACKTRACE.with(|b| std::mem::take(&mut *b.borrow_mut()))
+}
+
+/// Render a procedure value for a backtrace line.
+fn describe_callee(v: &Value) -> String {
+    match v {
+        Value::Procedure(p) => p.name().to_string(),
+        other => format!("{other}"),
+    }
+}
+
+/// Record the pending call chain (innermost first) from `frames` into
+/// the thread-local backtrace. Reads `CallArg` frames, whose `proc` is
+/// the procedure whose argument evaluation was in progress.
+fn capture_backtrace(frames: &[Frame]) {
+    let trace: Vec<String> = frames
+        .iter()
+        .rev()
+        .filter_map(|f| {
+            if let Frame::CallArg { proc, .. } = f {
+                Some(describe_callee(proc))
+            } else {
+                None
+            }
+        })
+        .collect();
+    BACKTRACE.with(|b| *b.borrow_mut() = trace);
+}
+
 /// Evaluate one expression in `env`. The expression is a runtime
 /// [`Value`] produced by [`crate::parse::parse_one`] or constructed
 /// programmatically.
@@ -302,21 +345,34 @@ pub fn eval(expr: Value, env: EnvRef) -> Result<Value, EvalError> {
     // invocation can replace it (`frames = saved`).
     let mut state = Step::Eval(expr, env);
     let mut frames: Vec<Frame> = Vec::new();
+    // On any error exit, snapshot the pending call chain for a backtrace
+    // (nscheme-tn3) before unwinding loses it.
+    macro_rules! try_step {
+        ($e:expr) => {
+            match $e {
+                Ok(step) => step,
+                Err(err) => {
+                    capture_backtrace(&frames);
+                    return Err(err);
+                }
+            }
+        };
+    }
     loop {
         state = match state {
             // Evaluate the expression. Returns the next Step —
             // possibly `Eval` again (we recursed into a sub-expr),
             // `Apply` (the expression was a call), `Return` (the
             // expression was self-evaluating), or `Raise`.
-            Step::Eval(expr, env) => step_eval(expr, env, &mut frames)?,
+            Step::Eval(expr, env) => try_step!(step_eval(expr, env, &mut frames)),
             // Apply a procedure to args. Returns the next Step the
             // procedure produced.
-            Step::Apply(proc, args) => step_apply(proc, args, &mut frames)?,
+            Step::Apply(proc, args) => try_step!(step_apply(proc, args, &mut frames)),
             // A sub-evaluation finished. Pop the top frame to
             // decide what's next. If there isn't one, the whole
             // evaluation is done and `value` is the result.
             Step::Return(value) => match frames.pop() {
-                Some(frame) => resume(frame, value, &mut frames)?,
+                Some(frame) => try_step!(resume(frame, value, &mut frames)),
                 None => return Ok(value),
             },
             // A captured continuation is being invoked. Per ADR
@@ -382,22 +438,23 @@ pub fn eval(expr: Value, env: EnvRef) -> Result<Value, EvalError> {
                     }
                     popped.push(frame);
                 }
-                match handler_found {
-                    Some(handler) => {
-                        if continuable {
-                            // Restore the frames between handler and
-                            // raise so the handler's result resumes at
-                            // the raise expression's position.
-                            for f in popped.into_iter().rev() {
-                                frames.push(f);
-                            }
-                        } else {
-                            frames.push(Frame::ReRaise);
-                        }
-                        Step::Apply(handler, vec![value])
+                let Some(handler) = handler_found else {
+                    // No handler: this raise escapes. Snapshot the call
+                    // chain for a backtrace, then surface it.
+                    capture_backtrace(&popped);
+                    return Err(EvalError::Raised(value));
+                };
+                if continuable {
+                    // Restore the frames between handler and raise so the
+                    // handler's result resumes at the raise expression's
+                    // position.
+                    for f in popped.into_iter().rev() {
+                        frames.push(f);
                     }
-                    None => return Err(EvalError::Raised(value)),
+                } else {
+                    frames.push(Frame::ReRaise);
                 }
+                Step::Apply(handler, vec![value])
             }
         };
     }
