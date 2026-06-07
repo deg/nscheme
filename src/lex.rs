@@ -12,6 +12,15 @@
 //!   tail (`+inf.0`, `+`, `...`, `->foo`, …), and the slightly
 //!   intricate numeric grammar including rationals (`3/4`) and
 //!   complex literals (`1+2i`, `3@1.57`).
+//! ## Lexical extension policy (bead nscheme-9gy)
+//!
+//! The reader implements R7RS §7.1.1 in full and accepts **no
+//! non-standard lexical extensions**. The only `#!` directives are the
+//! two the standard defines (`#!fold-case` / `#!no-fold-case`); anything
+//! else (`#!r6rs`, `#!eof`, …) and `#:keyword`-style syntax is rejected
+//! with a clear error rather than silently accepted. `tests/reader_audit.rs`
+//! exercises every §7.1.1 production.
+//!
 //! - **Writing a hand-coded lexer in Rust**: a state-machine style
 //!   driven by `peek_char` / `advance` / `skip_trivia`. No external
 //!   lexer generator. The result is one byte-indexed walk over the
@@ -163,6 +172,12 @@ pub enum LexError {
 
     #[error("invalid `#` syntax at byte {}", span.start)]
     InvalidHashSyntax { span: Span },
+
+    #[error(
+        "unknown `#!` directive `#!{name}` at byte {} (only #!fold-case / #!no-fold-case are supported)",
+        span.start
+    )]
+    UnknownDirective { name: String, span: Span },
 
     #[error("conflicting number prefixes at byte {}", span.start)]
     ConflictingNumberPrefix { span: Span },
@@ -528,7 +543,11 @@ impl<'a> Lexer<'a> {
         match name {
             "fold-case" => Ok(self.tok(TokenKind::FoldCase, start)),
             "no-fold-case" => Ok(self.tok(TokenKind::NoFoldCase, start)),
-            _ => Err(LexError::InvalidHashSyntax {
+            // R7RS §7.1.1 defines only the two fold-case directives. We
+            // deliberately do not accept non-standard ones (`#!r6rs`,
+            // `#!eof`, …); reject them with a directive-specific message.
+            other => Err(LexError::UnknownDirective {
+                name: other.to_string(),
                 span: Span::new(start, self.pos),
             }),
         }
