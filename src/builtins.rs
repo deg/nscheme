@@ -152,6 +152,10 @@ enum Num {
     Float(f64),
     /// Inexact complex with Cartesian (re, im).
     Complex(f64, f64),
+    /// Exact complex: both Cartesian parts are exact rationals. Kept
+    /// separate from `Complex` so `(* 1+2i 1-2i)` stays exact `5`
+    /// (nscheme-5mn) instead of falling through to f64.
+    ExactComplex(BigRational, BigRational),
 }
 
 impl Num {
@@ -161,7 +165,12 @@ impl Num {
             Value::BigInt(b) => Ok(Self::Big((**b).clone())),
             Value::Rational(r) => Ok(Self::Rat((**r).clone())),
             Value::Float(f) => Ok(Self::Float(*f)),
-            Value::Complex(c) => Ok(Self::Complex(c.re_f64(), c.im_f64())),
+            Value::Complex(c) => Ok(
+                match (value_exact_rational(&c.re), value_exact_rational(&c.im)) {
+                    (Some(re), Some(im)) => Self::ExactComplex(re, im),
+                    _ => Self::Complex(c.re_f64(), c.im_f64()),
+                },
+            ),
             other => Err(RuntimeError::Type {
                 expected: "number".into(),
                 got: other.type_name().into(),
@@ -182,6 +191,19 @@ impl Num {
                     Value::complex_inexact(re, im)
                 }
             }
+            Self::ExactComplex(re, im) => {
+                // Collapse an exact-zero imaginary part to a real, matching
+                // the reader's invariant (a surviving Complex always has a
+                // non-zero or inexact imaginary part).
+                if im.is_zero() {
+                    rational_to_value(re)
+                } else {
+                    Value::Complex(Rc::new(crate::value::ComplexValue {
+                        re: rational_to_value(re),
+                        im: rational_to_value(im),
+                    }))
+                }
+            }
         }
     }
 
@@ -193,22 +215,38 @@ impl Num {
             Self::Rat(r) => r.to_f64().unwrap_or(f64::NAN),
             Self::Float(f) => *f,
             Self::Complex(re, _) => *re,
+            Self::ExactComplex(re, _) => re.to_f64().unwrap_or(f64::NAN),
         }
     }
 
     fn is_inexact(&self) -> bool {
+        // ExactComplex is exact — deliberately excluded.
         matches!(self, Self::Float(_) | Self::Complex(_, _))
     }
 
     fn is_complex(&self) -> bool {
-        matches!(self, Self::Complex(_, _))
+        matches!(self, Self::Complex(_, _) | Self::ExactComplex(_, _))
     }
 
-    /// (re, im) view, with the imaginary part 0 for non-complex
+    /// Exact Cartesian parts if this number is exact (a real promotes to
+    /// `(re, 0)`); `None` for any inexact number.
+    fn exact_complex_parts(&self) -> Option<(BigRational, BigRational)> {
+        let zero = BigRational::zero();
+        match self {
+            Self::Int(_) | Self::Big(_) | Self::Rat(_) => Some((self.to_rational(), zero)),
+            Self::ExactComplex(re, im) => Some((re.clone(), im.clone())),
+            Self::Float(_) | Self::Complex(_, _) => None,
+        }
+    }
+
+    /// (re, im) view as f64, with the imaginary part 0 for non-complex
     /// numbers.
     fn to_complex(&self) -> (f64, f64) {
         match self {
             Self::Complex(re, im) => (*re, *im),
+            Self::ExactComplex(re, im) => {
+                (re.to_f64().unwrap_or(f64::NAN), im.to_f64().unwrap_or(f64::NAN))
+            }
             _ => (self.to_f64(), 0.0),
         }
     }
@@ -219,8 +257,98 @@ impl Num {
             Self::Int(n) => BigRational::from_i64(*n).expect("i64 to BigRational"),
             Self::Big(b) => BigRational::from_integer(b.clone()),
             Self::Rat(r) => r.clone(),
-            Self::Float(_) | Self::Complex(_, _) => unreachable!("to_rational on inexact"),
+            Self::Float(_) | Self::Complex(_, _) | Self::ExactComplex(_, _) => {
+                unreachable!("to_rational on non-real")
+            }
         }
+    }
+}
+
+/// Whether a complex value's Cartesian parts are both exact.
+fn complex_is_exact(c: &crate::value::ComplexValue) -> bool {
+    value_exact_rational(&c.re).is_some() && value_exact_rational(&c.im).is_some()
+}
+
+/// R7RS `inexact` / `exact->inexact`: force a number to inexact,
+/// preserving complex-ness (both Cartesian parts become inexact).
+fn to_inexact_value(v: &Value) -> Result<Value, RuntimeError> {
+    match v {
+        Value::Float(_) => Ok(v.clone()),
+        Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => {
+            Ok(Value::Float(Num::from_value(v)?.to_f64()))
+        }
+        Value::Complex(c) => {
+            let (re, im) = (c.re_f64(), c.im_f64());
+            Ok(if im == 0.0 {
+                Value::Float(re)
+            } else {
+                Value::complex_inexact(re, im)
+            })
+        }
+        other => Err(RuntimeError::Type {
+            expected: "number".into(),
+            got: other.type_name().into(),
+        }),
+    }
+}
+
+/// R7RS `exact` / `inexact->exact`: force a number to exact, preserving
+/// complex-ness (both Cartesian parts become exact rationals).
+fn to_exact_value(v: &Value) -> Result<Value, RuntimeError> {
+    match v {
+        Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(v.clone()),
+        Value::Float(f) => float_to_exact(*f),
+        Value::Complex(c) => {
+            let re = component_to_exact_rational(&c.re)?;
+            let im = component_to_exact_rational(&c.im)?;
+            // into_value collapses an exact-zero imaginary part to a real.
+            Ok(Num::ExactComplex(re, im).into_value())
+        }
+        other => Err(RuntimeError::Type {
+            expected: "number".into(),
+            got: other.type_name().into(),
+        }),
+    }
+}
+
+/// Exact rational of a single real component (exact stays, float converts).
+fn component_to_exact_rational(v: &Value) -> Result<BigRational, RuntimeError> {
+    if let Some(r) = value_exact_rational(v) {
+        return Ok(r);
+    }
+    match v {
+        Value::Float(f) => {
+            if !f.is_finite() {
+                return Err(RuntimeError::Other(format!("cannot convert {f} to exact")));
+            }
+            BigRational::from_f64(*f)
+                .ok_or_else(|| RuntimeError::Other(format!("cannot convert {f} to exact")))
+        }
+        other => Err(RuntimeError::Type {
+            expected: "real".into(),
+            got: other.type_name().into(),
+        }),
+    }
+}
+
+/// A finite f64 to the exact rational `Value` it equals.
+fn float_to_exact(f: f64) -> Result<Value, RuntimeError> {
+    if !f.is_finite() {
+        return Err(RuntimeError::Other(format!("cannot convert {f} to exact")));
+    }
+    let r = BigRational::from_f64(f)
+        .ok_or_else(|| RuntimeError::Other(format!("cannot convert {f} to exact")))?;
+    Ok(rational_to_value(r))
+}
+
+/// The exact rational value of `v` if it is an exact real; `None` for
+/// floats and complex values.
+fn value_exact_rational(v: &Value) -> Option<BigRational> {
+    match v {
+        Value::Int(n) => Some(BigRational::from_i64(*n).expect("i64 to BigRational")),
+        Value::BigInt(b) => Some(BigRational::from_integer((**b).clone())),
+        Value::Rational(r) => Some((**r).clone()),
+        _ => None,
     }
 }
 
@@ -443,6 +571,11 @@ fn rational_to_value(r: BigRational) -> Value {
 
 fn num_add(a: Num, b: Num) -> Num {
     if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) =
+            (a.exact_complex_parts(), b.exact_complex_parts())
+        {
+            return Num::ExactComplex(ar + br, ai + bi);
+        }
         let (ax, ay) = a.to_complex();
         let (bx, by) = b.to_complex();
         return Num::Complex(ax + bx, ay + by);
@@ -461,6 +594,11 @@ fn num_add(a: Num, b: Num) -> Num {
 
 fn num_sub(a: Num, b: Num) -> Num {
     if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) =
+            (a.exact_complex_parts(), b.exact_complex_parts())
+        {
+            return Num::ExactComplex(ar - br, ai - bi);
+        }
         let (ax, ay) = a.to_complex();
         let (bx, by) = b.to_complex();
         return Num::Complex(ax - bx, ay - by);
@@ -479,6 +617,12 @@ fn num_sub(a: Num, b: Num) -> Num {
 
 fn num_mul(a: Num, b: Num) -> Num {
     if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) =
+            (a.exact_complex_parts(), b.exact_complex_parts())
+        {
+            // (ar + ai·i)(br + bi·i) = (ar·br − ai·bi) + (ar·bi + ai·br)i
+            return Num::ExactComplex(&ar * &br - &ai * &bi, &ar * &bi + &ai * &br);
+        }
         let (ax, ay) = a.to_complex();
         let (bx, by) = b.to_complex();
         return Num::Complex(ax * bx - ay * by, ax * by + ay * bx);
@@ -497,6 +641,20 @@ fn num_mul(a: Num, b: Num) -> Num {
 
 fn num_div(a: Num, b: Num) -> Result<Num, RuntimeError> {
     if a.is_complex() || b.is_complex() {
+        if let (Some((ar, ai)), Some((br, bi))) =
+            (a.exact_complex_parts(), b.exact_complex_parts())
+        {
+            // (ar + ai·i)/(br + bi·i): multiply by the conjugate of the
+            // denominator; denom = br² + bi².
+            let denom = &br * &br + &bi * &bi;
+            if denom.is_zero() {
+                return Err(RuntimeError::DivisionByZero);
+            }
+            return Ok(Num::ExactComplex(
+                (&ar * &br + &ai * &bi) / &denom,
+                (&ai * &br - &ar * &bi) / &denom,
+            ));
+        }
         let (ax, ay) = a.to_complex();
         let (bx, by) = b.to_complex();
         let denom = bx * bx + by * by;
@@ -531,6 +689,7 @@ fn num_neg(a: Num) -> Num {
         Num::Rat(r) => Num::Rat(-r),
         Num::Float(f) => Num::Float(-f),
         Num::Complex(re, im) => Num::Complex(-re, -im),
+        Num::ExactComplex(re, im) => Num::ExactComplex(-re, -im),
     }
 }
 
@@ -541,6 +700,7 @@ fn num_is_zero(n: &Num) -> bool {
         Num::Rat(r) => r.is_zero(),
         Num::Float(f) => *f == 0.0,
         Num::Complex(re, im) => *re == 0.0 && *im == 0.0,
+        Num::ExactComplex(re, im) => re.is_zero() && im.is_zero(),
     }
 }
 
@@ -771,7 +931,7 @@ fn install_arithmetic(env: &EnvRef) {
             Num::Float(f) => Num::Float(f.abs()),
             // R7RS abs requires a real argument; calling on complex
             // is an error per §6.2.6. Surface that as a type error.
-            Num::Complex(_, _) => {
+            Num::Complex(_, _) | Num::ExactComplex(_, _) => {
                 return Err(RuntimeError::Type {
                     expected: "real".into(),
                     got: "complex".into(),
@@ -944,14 +1104,17 @@ fn install_predicates(env: &EnvRef) {
     });
     define(env, "exact?", Arity::Exact(1), |a| match &a[0] {
         Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(true)),
-        Value::Float(_) | Value::Complex(_) => Ok(Value::Bool(false)),
+        // A complex is exact iff both Cartesian parts are exact.
+        Value::Complex(c) => Ok(Value::Bool(complex_is_exact(c))),
+        Value::Float(_) => Ok(Value::Bool(false)),
         other => Err(RuntimeError::Type {
             expected: "number".into(),
             got: other.type_name().into(),
         }),
     });
     define(env, "inexact?", Arity::Exact(1), |a| match &a[0] {
-        Value::Float(_) | Value::Complex(_) => Ok(Value::Bool(true)),
+        Value::Float(_) => Ok(Value::Bool(true)),
+        Value::Complex(c) => Ok(Value::Bool(!complex_is_exact(c))),
         Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(Value::Bool(false)),
         other => Err(RuntimeError::Type {
             expected: "number".into(),
@@ -1292,53 +1455,11 @@ fn assoc_with(
 // ---------------------------------------------------------------------
 
 fn install_misc(env: &EnvRef) {
-    define(env, "exact->inexact", Arity::Exact(1), |a| {
-        let n = Num::from_value(&a[0])?;
-        Ok(Value::Float(n.to_f64()))
-    });
-    define(env, "inexact->exact", Arity::Exact(1), |a| match &a[0] {
-        Value::Float(f) => {
-            if !f.is_finite() {
-                return Err(RuntimeError::Other(format!("cannot convert {f} to exact")));
-            }
-            let r = BigRational::from_f64(*f)
-                .ok_or_else(|| RuntimeError::Other(format!("cannot convert {f} to exact")))?;
-            Ok(rational_to_value(r))
-        }
-        Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(a[0].clone()),
-        other => Err(RuntimeError::Type {
-            expected: "number".into(),
-            got: other.type_name().into(),
-        }),
-    });
-    define(env, "exact", Arity::Exact(1), |a| {
-        // R7RS `exact` is the modern alias for `inexact->exact`.
-        match &a[0] {
-            Value::Float(f) => {
-                if !f.is_finite() {
-                    return Err(RuntimeError::Other(format!("cannot convert {f} to exact")));
-                }
-                let r = BigRational::from_f64(*f)
-                    .ok_or_else(|| RuntimeError::Other(format!("cannot convert {f} to exact")))?;
-                Ok(rational_to_value(r))
-            }
-            Value::Int(_) | Value::BigInt(_) | Value::Rational(_) => Ok(a[0].clone()),
-            Value::Complex(_) => Err(RuntimeError::Other(
-                "exact: nscheme v1 has no exact-complex tower".into(),
-            )),
-            other => Err(RuntimeError::Type {
-                expected: "number".into(),
-                got: other.type_name().into(),
-            }),
-        }
-    });
-    define(env, "inexact", Arity::Exact(1), |a| {
-        if let Value::Complex(_) = &a[0] {
-            return Ok(a[0].clone());
-        }
-        let n = Num::from_value(&a[0])?;
-        Ok(Value::Float(n.to_f64()))
-    });
+    define(env, "exact->inexact", Arity::Exact(1), |a| to_inexact_value(&a[0]));
+    define(env, "inexact->exact", Arity::Exact(1), |a| to_exact_value(&a[0]));
+    // R7RS `exact` / `inexact` are the modern aliases.
+    define(env, "exact", Arity::Exact(1), |a| to_exact_value(&a[0]));
+    define(env, "inexact", Arity::Exact(1), |a| to_inexact_value(&a[0]));
     define(env, "numerator", Arity::Exact(1), |a| match &a[0] {
         Value::Int(n) => Ok(Value::Int(*n)),
         Value::BigInt(b) => Ok(Value::BigInt(b.clone())),
@@ -1379,7 +1500,7 @@ fn install_misc(env: &EnvRef) {
                     Num::Rat(r) => r.pow(i32::try_from(exp_u32).map_err(|_| {
                         RuntimeError::Other("expt: exponent magnitude too large".into())
                     })?),
-                    Num::Float(_) | Num::Complex(_, _) => unreachable!(),
+                    Num::Float(_) | Num::Complex(_, _) | Num::ExactComplex(_, _) => unreachable!(),
                 };
                 let one = BigRational::from_integer(BigInt::from(1));
                 let inv = one / pow_rat;
@@ -1394,7 +1515,7 @@ fn install_misc(env: &EnvRef) {
                 Num::Rat(r) => rational_to_value(r.pow(i32::try_from(exp_u32).map_err(|_| {
                     RuntimeError::Other("expt: exponent magnitude too large".into())
                 })?)),
-                Num::Float(_) | Num::Complex(_, _) => unreachable!(),
+                Num::Float(_) | Num::Complex(_, _) | Num::ExactComplex(_, _) => unreachable!(),
             };
             return Ok(result);
         }

@@ -5,9 +5,15 @@
 > **Update (2026-06-03):** Complex numbers have since landed. The
 > "Consequences → Negative" note below ("we don't yet recognize complex
 > numbers — the parser errors") is no longer true: complex literals like
-> `1+2i` now parse and evaluate, and `make-rectangular` works. One
-> limitation remains — exact-complex arithmetic falls through to inexact
-> (`(* 1+2i 1+2i)` is computed in floats); tracked in `nscheme-5mn`.
+> `1+2i` now parse and evaluate, and `make-rectangular` works.
+>
+> **Update (2026-06-07):** Exact-complex arithmetic now works too
+> (`nscheme-5mn`). A fifth `Num` rung, `ExactComplex(BigRational,
+> BigRational)`, keeps `+ - * /` exact when both Cartesian parts are
+> exact — `(* 1+2i 1-2i)` → exact `5`, `(/ 1 1+2i)` → `1/5-2/5i` — and
+> the exactness predicates / `exact`·`inexact` converters inspect both
+> parts. Inexactness stays contagious. (`magnitude`/`angle`/`sqrt`
+> remain inexact, as R7RS permits.)
 
 ## Context
 
