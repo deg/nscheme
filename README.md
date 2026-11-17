@@ -132,7 +132,7 @@ node web/browser-test.mjs          # drives the page in headless Chrome
 python3 -m http.server -d web/www  # then open http://localhost:8000/
 ```
 
-Programs run in a Web Worker, so output streams in as it is printed and Stop ends a run that goes on too long. Console input reads as end-of-file, and there is no file system yet. See [ADR 0012](docs/0012-browser-target.md) and [ADR 0013](docs/0013-browser-playground.md).
+The page is a REPL session: each entry is evaluated in the same environment, so definitions build up until you press Reset (or call `exit`). Reset gives fresh definitions and reloads your own libraries, but keeps the standard libraries cached, including any changes an entry made to them; Stop is the full restart. Entries run in a Web Worker, so output streams in as it is printed, and Stop ends one that goes on too long (and starts a new session). Console input reads as end-of-file, and there is no file system yet. See [ADR 0012](docs/0012-browser-target.md) and [ADR 0013](docs/0013-browser-playground.md).
 
 ## A short tour of Scheme
 
@@ -232,7 +232,7 @@ Tracked in the `bd` issue tracker, with deeper detail in [`docs/`](docs/):
 - `exit` does not run pending `dynamic-wind` after-thunks (`nscheme-zni`)
 - `make-parameter` ignores its converter procedure (`nscheme-x17`)
 - `force` turns a `raise` inside a promise into an error string, so handlers can't see the raised object (`nscheme-rsh`)
-- In the browser: no REPL or saved files yet (`nscheme-yd0.2`), and no console input (`nscheme-yd0.3`)
+- In the browser: no saved files yet (`nscheme-yd0.2.4`), and no console input (`nscheme-yd0.3`)
 
 ## Design
 
@@ -262,7 +262,7 @@ ADR 0001 is the load-bearing one: it explains why the evaluator is a step-loop w
 cargo test --workspace
 ```
 
-That runs about **712 tests across ~50 files** in a few seconds (plain `cargo test` skips the browser wrapper's 7) (the slow SRFI 132 sort suite is `#[ignore]`d — run it with `-- --ignored`). The suite covers each module's unit tests, end-to-end integration tests (evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters), the in-house R7RS conformance corpus, and the R7RS-large reference-suite harness described below.
+That runs about **718 tests across ~51 files** in a few seconds (plain `cargo test` skips the browser wrapper's 7) (the slow SRFI 132 sort suite is `#[ignore]`d — run it with `-- --ignored`). The suite covers each module's unit tests, end-to-end integration tests (evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters), the in-house R7RS conformance corpus, and the R7RS-large reference-suite harness described below.
 
 ### R7RS-large reference suites
 

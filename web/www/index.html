@@ -53,7 +53,6 @@
     flex-wrap: wrap;
     gap: 8px;
     align-items: center;
-    margin-bottom: 8px;
   }
   .toolbar label { color: var(--muted); font-size: 0.9rem; }
   select, button {
@@ -74,7 +73,7 @@
     cursor: pointer;
   }
   button.run:disabled { opacity: 0.5; cursor: progress; }
-  .hint { color: var(--muted); font-size: 0.85rem; margin-left: auto; }
+  .hint { color: var(--muted); font-size: 0.85rem; }
   textarea, .output {
     width: 100%;
     font: 14px/1.5 var(--mono);
@@ -85,9 +84,10 @@
     padding: 12px 14px;
   }
   textarea {
-    min-height: 280px;
+    min-height: 150px;
     resize: vertical;
     tab-size: 2;
+    margin-top: 8px;
   }
   textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   h2 {
@@ -99,6 +99,10 @@
   }
   .output {
     min-height: 120px;
+    /* The transcript scrolls inside its box, so the input below it stays
+       on screen; the script keeps it at the end unless you scroll up. */
+    max-height: 60vh;
+    overflow-y: auto;
     margin: 0;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
@@ -106,6 +110,9 @@
   .output .value { color: var(--ok); }
   .output .error { color: var(--error); }
   .output .note { color: var(--muted); font-style: italic; }
+  .output .echo { color: var(--accent); font-weight: 500; }
+  .help { color: var(--muted); font-size: 0.85rem; margin: 6px 0 10px; }
+  .toolbar .hint { margin-left: auto; }
   footer { color: var(--muted); font-size: 0.85rem; margin-top: 24px; }
   footer a { color: inherit; }
 </style>
@@ -118,23 +125,25 @@
     <code>(import (scheme list))</code>.
     <a href="https://github.com/deg/nscheme">Source on GitHub</a>.</p>
 
+  <h2>Session</h2>
+  <pre class="output" id="output" aria-live="polite"></pre>
+  <textarea id="source" spellcheck="false" autocomplete="off" autocapitalize="off"
+            aria-label="Scheme to evaluate" aria-describedby="help"></textarea>
+  <p class="help" id="help"></p>
   <div class="toolbar">
     <label for="examples">Example</label>
     <select id="examples"></select>
-    <button class="run" id="run" disabled>Loading…</button>
+    <button class="run" id="evaluate" disabled>Loading…</button>
     <button id="stop" disabled>Stop</button>
-    <span class="hint" id="hint">Ctrl+Enter runs</span>
+    <button id="reset" disabled
+            title="Fresh definitions; your libraries reload on their next import. Changes made to the standard libraries themselves (say, set! on an imported binding) last until Stop, the full restart.">Reset</button>
+    <span class="hint" id="timing"></span>
   </div>
-  <textarea id="source" spellcheck="false" autocomplete="off" autocapitalize="off"
-            aria-label="Scheme program"></textarea>
-
-  <h2>Output</h2>
-  <pre class="output" id="output" aria-live="polite"></pre>
 
   <footer>
-    Each run starts with no definitions of its own, though a library stays loaded once a
-    run has imported it. Programs run in the background, so Stop ends one that runs too
-    long. There is no keyboard input or file system yet.
+    Every entry is evaluated in the same session, so definitions build up until you press
+    Reset. Entries run in the background: Stop ends one that runs too long, and starts a
+    new session. There is no keyboard input or file system yet.
   </footer>
 </main>
 
@@ -194,36 +203,56 @@ const EXAMPLES = {
 const select = document.getElementById("examples");
 const source = document.getElementById("source");
 const output = document.getElementById("output");
-const runButton = document.getElementById("run");
-const hint = document.getElementById("hint");
-
-for (const name of Object.keys(EXAMPLES)) {
-  select.add(new Option(name, name));
-}
-select.addEventListener("change", () => { source.value = EXAMPLES[select.value]; });
-source.value = EXAMPLES[select.value];
-if (/Mac|iPhone|iPad/.test(navigator.platform)) hint.textContent = "⌘+Enter runs";
-
-// The interpreter runs in a Web Worker (worker.js), so a long or endless
-// program never freezes the page. Stop terminates the worker and starts
-// a new one; so does a crash (a Rust panic or a stack overflow leaves the
-// worker's wasm instance unusable). Output streams in as the program
-// writes it.
+const evalButton = document.getElementById("evaluate");
 const stopButton = document.getElementById("stop");
+const resetButton = document.getElementById("reset");
+const timing = document.getElementById("timing");
+
+const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
+document.getElementById("help").textContent =
+  `Enter evaluates when the parentheses balance · Shift+Enter adds a line · ` +
+  `${mod}+Enter always evaluates · ${mod}+↑/↓ steps through earlier entries`;
+
+for (const name of Object.keys(EXAMPLES)) select.add(new Option(name, name));
+select.addEventListener("change", () => {
+  source.value = EXAMPLES[select.value];
+  // An example is a new draft, not an edit of a recalled entry.
+  historyIndex = history.length;
+  edits.clear();
+  source.focus();
+});
+source.value = EXAMPLES[select.value];
+
+// The interpreter runs in a Web Worker (worker.js), which keeps one Scheme
+// environment for the whole session. Stop terminates the worker and
+// starts a new one; so does a crash (a Rust panic or a stack overflow
+// leaves the worker's wasm instance unusable). Either way the session's
+// definitions are gone. Output streams in as an entry writes it.
 let worker = null;
 let ready = false;
-// The run in progress: {id, started, kept, hidden, note, endsInNewline}.
+// The entry in progress: {id, started, outputArea, note, kept, hidden, endsInNewline}.
 let current = null;
 let nextId = 1;
+const history = [];
+let historyIndex = 0; // history.length means "the entry being written"
+let draft = "";
+// Edits made to recalled entries, kept until the next submit, so stepping
+// away from one and back doesn't lose them (as in a shell).
+const edits = new Map();
 
 // A runaway printing loop can produce megabytes a second. The page keeps
-// at most this much of a run's output and counts the rest, so it stays
+// at most this much of an entry's output and counts the rest, so it stays
 // responsive (and Stop keeps working) however long the loop runs.
 const MAX_KEPT_CHARS = 1_000_000;
+// And the transcript, which builds up across entries, keeps at most this
+// much in all: past it, the oldest output is removed.
+const MAX_PAGE_CHARS = 2_000_000;
+let pageChars = 0;
+let trimmedMarker = null;
 
 function startWorker() {
   ready = false;
-  runButton.disabled = true;
+  updateButtons();
   worker = new Worker("./worker.js", { type: "module" });
   worker.onmessage = (event) => onWorkerMessage(event.data);
   worker.onerror = (event) => {
@@ -232,10 +261,16 @@ function startWorker() {
   };
 }
 
+function updateButtons() {
+  evalButton.disabled = !ready || current !== null;
+  resetButton.disabled = !ready || current !== null;
+  stopButton.disabled = current === null;
+}
+
 function unavailable(message) {
-  runButton.textContent = "Unavailable";
-  runButton.disabled = true;
-  stopButton.disabled = true;
+  ready = false;
+  evalButton.textContent = "Unavailable";
+  updateButtons();
   line(`${message}. Reload the page to try again.\n`, "error");
 }
 
@@ -243,8 +278,8 @@ function onWorkerMessage(msg) {
   switch (msg.type) {
     case "ready":
       ready = true;
-      runButton.textContent = "Run";
-      runButton.disabled = current !== null;
+      evalButton.textContent = "Evaluate";
+      updateButtons();
       break;
     case "failed":
       unavailable(`Could not load the interpreter: ${msg.message}`);
@@ -253,94 +288,225 @@ function onWorkerMessage(msg) {
       if (current && msg.id === current.id) showOutput(msg.text);
       break;
     case "done":
-      if (current && msg.id === current.id) finishRun(msg);
+      if (current && msg.id === current.id) finishEntry(msg);
       break;
     case "crashed":
       if (current && msg.id === current.id) {
         line(`${current.endsInNewline ? "" : "\n"}The interpreter crashed: ${msg.message}\n`, "error");
-        line("(Very deep nesting can exhaust the browser's stack.) Restarting it…\n", "note");
+        line("(Very deep nesting can exhaust the browser's stack.) " +
+             "Restarting it; the session's definitions are gone.\n", "note");
         restart();
       }
+      break;
+    case "broken":
+      line(`The interpreter failed during a reset (${msg.message}); restarting it.\n`, "error");
+      restart();
       break;
   }
 }
 
-// Add a batch of program output. Each batch is its own text node: growing
-// one node would copy all the text so far on every batch.
+// Keep the transcript scrolled to its end, unless the reader has
+// scrolled up to look at something. Whether they have is noted when they
+// scroll, and the scrolling happens once per frame: measuring the layout
+// on every batch of a fast loop would lay out the whole transcript each
+// time.
+let following = true;
+let scrollPending = false;
+output.addEventListener("scroll", () => {
+  following = output.scrollHeight - output.scrollTop - output.clientHeight < 8;
+});
+function appendFollowing(fn) {
+  fn();
+  trimTranscript();
+  if (following && !scrollPending) {
+    scrollPending = true;
+    requestAnimationFrame(() => {
+      scrollPending = false;
+      if (following) output.scrollTop = output.scrollHeight;
+    });
+  }
+}
+
+// Remove the oldest output once the transcript passes MAX_PAGE_CHARS,
+// leaving a marker at the top. The entry in progress keeps its markers.
+function trimTranscript() {
+  if (pageChars <= MAX_PAGE_CHARS) return;
+  if (!trimmedMarker) {
+    trimmedMarker = document.createElement("span");
+    trimmedMarker.className = "note";
+    trimmedMarker.textContent = "[earlier output removed]\n";
+    output.prepend(trimmedMarker);
+  }
+  let node = trimmedMarker.nextSibling;
+  while (pageChars > MAX_PAGE_CHARS && node && node !== current?.outputArea && node !== current?.note) {
+    const next = node.nextSibling;
+    pageChars -= node.textContent.length;
+    node.remove();
+    node = next;
+  }
+}
+
+// Add a batch of an entry's output. Each batch is its own text node:
+// growing one node would copy all the text so far on every batch.
 function showOutput(text) {
-  const room = MAX_KEPT_CHARS - current.kept;
-  if (room > 0) {
-    const shown = text.length <= room ? text : text.slice(0, room);
-    current.outputArea.before(document.createTextNode(shown));
-    current.kept += shown.length;
-    current.endsInNewline = shown.endsWith("\n");
-  }
-  const dropped = Math.max(0, text.length - Math.max(0, room));
-  if (dropped > 0) {
-    current.hidden += dropped;
-    current.note.textContent = `\n[… ${current.hidden.toLocaleString()} more characters not shown]\n`;
-    current.endsInNewline = true;
-  }
+  appendFollowing(() => {
+    const room = MAX_KEPT_CHARS - current.kept;
+    if (room > 0) {
+      const shown = text.length <= room ? text : text.slice(0, room);
+      current.outputArea.before(document.createTextNode(shown));
+      current.kept += shown.length;
+      pageChars += shown.length;
+      current.endsInNewline = shown.endsWith("\n");
+    }
+    const dropped = Math.max(0, text.length - Math.max(0, room));
+    if (dropped > 0) {
+      current.hidden += dropped;
+      current.note.textContent = `\n[… ${current.hidden.toLocaleString()} more characters not shown]\n`;
+      current.endsInNewline = true;
+    }
+  });
 }
 
 function line(text, cls) {
-  const span = document.createElement("span");
-  if (cls) span.className = cls;
-  span.textContent = text;
-  output.append(span);
+  appendFollowing(() => {
+    const span = document.createElement("span");
+    if (cls) span.className = cls;
+    span.textContent = text;
+    output.append(span);
+    pageChars += text.length;
+  });
 }
 
-function run() {
-  if (!ready || current) return;
-  output.replaceChildren();
-  // Output goes before `outputArea`, an empty marker; the truncation note
-  // sits right after the kept output.
+// Echo an entry the way it was typed, as "› first line" with the rest
+// indented under it.
+function echo(text) {
+  const lines = text.split("\n");
+  line(lines.map((l, i) => (i === 0 ? "› " : "  ") + l).join("\n") + "\n", "echo");
+}
+
+// Whether `text` is a complete entry: its parentheses balance, outside
+// strings, comments, character literals and |quoted symbols|. Too many
+// closing parentheses also counts, so the reader can report the error.
+function isComplete(text) {
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === ";") {
+      while (i < text.length && text[i] !== "\n") i++;
+    } else if (c === '"' || c === "|") {
+      i++;
+      while (i < text.length && text[i] !== c) i += text[i] === "\\" ? 2 : 1;
+      if (i >= text.length) return false; // unterminated
+    } else if (c === "#" && text[i + 1] === "\\") {
+      i += 2; // #\( and the like
+    } else if (c === "#" && text[i + 1] === "|") {
+      let nest = 1;
+      for (i += 2; i < text.length && nest > 0; i++) {
+        if (text[i] === "|" && text[i + 1] === "#") { nest--; i++; }
+        else if (text[i] === "#" && text[i + 1] === "|") { nest++; i++; }
+      }
+      if (nest > 0) return false;
+      i--;
+    } else if (c === "(" || c === "[") {
+      depth++;
+    } else if (c === ")" || c === "]") {
+      depth--;
+    }
+  }
+  return depth <= 0 && text.trim() !== "";
+}
+
+function submit() {
+  const text = source.value.replace(/\s+$/, "");
+  if (!ready || current || text === "") return;
+  if (history[history.length - 1] !== text) history.push(text);
+  historyIndex = history.length;
+  draft = "";
+  edits.clear();
+  source.value = "";
+  echo(text);
   const outputArea = document.createTextNode("");
   const note = document.createElement("span");
   note.className = "note";
-  output.append(outputArea, note);
+  appendFollowing(() => output.append(outputArea, note));
   current = { id: nextId++, started: performance.now(), outputArea, note, kept: 0, hidden: 0, endsInNewline: true };
-  runButton.disabled = true;
-  stopButton.disabled = false;
-  worker.postMessage({ type: "run", id: current.id, source: source.value });
+  updateButtons();
+  worker.postMessage({ type: "eval", id: current.id, source: text });
 }
 
-function finishRun(r) {
+function finishEntry(r) {
   const anything = r.value !== undefined || r.error !== undefined || r.exitCode !== undefined;
   if (anything && !current.endsInNewline) line("\n");
   if (r.value !== undefined) line(`⇒ ${r.value}\n`, "value");
   if (r.error !== undefined) line(`${r.error}\n`, "error");
-  if (r.exitCode !== undefined) line(`[exited with status ${r.exitCode}]\n`, "note");
-  endRun();
+  endEntry();
+  // exit ends the session, as it does in the CLI REPL: the definitions
+  // and your libraries go, but the transcript stays.
+  if (r.exitCode !== undefined) {
+    worker.postMessage({ type: "reset" });
+    line(`[exited with status ${r.exitCode}; the session was reset]\n`, "note");
+  }
 }
 
-function endRun() {
-  const ms = Math.round(performance.now() - current.started);
-  line(`\n[${ms} ms]`, "note");
+function endEntry() {
+  timing.textContent = `last entry: ${Math.round(performance.now() - current.started)} ms`;
   current = null;
-  stopButton.disabled = true;
-  runButton.disabled = !ready;
+  updateButtons();
 }
 
-// End the run in progress by discarding its worker, and start a new one.
+// Discard the worker (ending any entry in progress) and start a new one.
 function restart() {
   worker.terminate();
-  endRun();
+  if (current) endEntry();
   startWorker();
 }
 
 function stop() {
   if (!current) return;
-  line(`${current.endsInNewline ? "" : "\n"}[stopped]\n`, "note");
+  line(`${current.endsInNewline ? "" : "\n"}[stopped; the session's definitions are gone]\n`, "note");
   restart();
 }
 
-runButton.addEventListener("click", run);
+function reset() {
+  if (!ready || current) return;
+  worker.postMessage({ type: "reset" });
+  output.replaceChildren();
+  pageChars = 0;
+  trimmedMarker = null;
+  following = true;
+  timing.textContent = "";
+  line("[reset: fresh definitions; your libraries reload on their next import]\n", "note");
+}
+
+function stepHistory(delta) {
+  const next = historyIndex + delta;
+  if (next < 0 || next > history.length) return;
+  if (historyIndex === history.length) draft = source.value;
+  else edits.set(historyIndex, source.value);
+  historyIndex = next;
+  source.value = next === history.length ? draft : (edits.get(next) ?? history[next]);
+}
+
+evalButton.addEventListener("click", submit);
 stopButton.addEventListener("click", stop);
+resetButton.addEventListener("click", reset);
 source.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+  // Enter that confirms an input method's composition (Japanese, Chinese,
+  // ...) belongs to the input method.
+  if (e.isComposing || e.keyCode === 229) return;
+  const withMod = e.ctrlKey || e.metaKey;
+  const idle = ready && !current;
+  if (e.key === "Enter" && withMod) {
     e.preventDefault();
-    run();
+    submit();
+  } else if (e.key === "Enter" && !e.shiftKey && !e.altKey && idle && isComplete(source.value)) {
+    // (While an entry runs, Enter just adds a line, so the next entry
+    // can be typed.)
+    e.preventDefault();
+    submit();
+  } else if (withMod && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    e.preventDefault();
+    stepHistory(e.key === "ArrowUp" ? -1 : 1);
   }
 });
 

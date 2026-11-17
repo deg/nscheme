@@ -42,6 +42,14 @@
 //! A file on disk always wins, so editing `lib/` takes effect without
 //! a rebuild during development. See ADR 0012.
 //!
+//! ## Standard and user libraries
+//!
+//! The registry remembers which libraries are *standard*: loaded from
+//! the compiled-in copy or from the crate's own `lib/` directory.
+//! [`forget_user_libraries`] drops all the others (saved files, inline
+//! `define-library` forms), so the browser playground's Reset makes an
+//! edited library reload while the standard ones stay cached (ADR 0013).
+//!
 //! ## Mutable bindings are shared, not copied
 //!
 //! A library's exports are stored as the *cells* that back them (see
@@ -52,7 +60,7 @@
 //! resolved the former value-copy gap (bead `nscheme-q1c`).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::env::{Cell, Env, EnvRef};
@@ -148,7 +156,38 @@ pub fn library_exists(name: &LibraryName) -> bool {
 
 #[allow(clippy::implicit_hasher)]
 pub fn register_library(name: LibraryName, bindings: HashMap<Symbol, Cell>) {
+    // Registered while loading a compiled-in source: a standard library.
+    // Anything else, including a user library that re-registers a
+    // standard name, is not, so the mark is set or cleared every time.
+    let standard = LOAD_KINDS.with(|k| k.borrow().last().copied()) == Some(LoadKind::Standard);
+    STANDARD.with(|s| {
+        let mut s = s.borrow_mut();
+        if standard {
+            s.insert(name.clone());
+        } else {
+            s.remove(&name);
+        }
+    });
     LIBRARIES.with(|r| r.borrow_mut().insert(name, bindings));
+}
+
+/// Forget every registered library except the standard ones (those
+/// loaded from the copy of `lib/` compiled into the binary), so the next
+/// `import` of any other reloads it from its source. Environments that
+/// already imported a library keep the bindings they have.
+///
+/// The browser playground's Reset calls this, so a library the user
+/// edited (a saved file, or an inline `define-library`) takes effect,
+/// while the standard libraries stay cached: reloading those costs up to
+/// a second (bead nscheme-yd0.2.3). Standard libraries import only one
+/// another, so none of them holds a forgotten library, unless a saved
+/// file shadows a standard library's name; the standard libraries that
+/// imported the original keep it until the interpreter restarts.
+pub fn forget_user_libraries() {
+    STANDARD.with(|standard| {
+        let standard = standard.borrow();
+        LIBRARIES.with(|r| r.borrow_mut().retain(|name, _| standard.contains(name)));
+    });
 }
 
 pub fn library_bindings(name: &LibraryName) -> Option<HashMap<Symbol, Cell>> {
@@ -189,6 +228,27 @@ thread_local! {
     /// but would recurse forever on a true cycle (A→B, B→A). This set
     /// catches the cycle and turns it into a clean error.
     static LOADING: RefCell<Vec<LibraryName>> = const { RefCell::new(Vec::new()) };
+
+    /// Where each load in progress comes from, innermost last, so
+    /// [`register_library`] can tell a standard library from a user's
+    /// one even when one load triggers another.
+    static LOAD_KINDS: RefCell<Vec<LoadKind>> = const { RefCell::new(Vec::new()) };
+
+    /// The libraries registered by loading a compiled-in source: what
+    /// [`forget_user_libraries`] keeps.
+    static STANDARD: RefCell<HashSet<LibraryName>> = RefCell::new(HashSet::new());
+}
+
+/// The crate's `lib/` directory as of the build: where the standard
+/// libraries live in a development checkout.
+const COMPILED_LIB_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/lib");
+
+/// Whether a load in progress reads a standard library (compiled in, or
+/// from [`COMPILED_LIB_DIR`]) or a file the user supplied.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoadKind {
+    Standard,
+    User,
 }
 
 thread_local! {
@@ -254,7 +314,7 @@ fn library_search_path() -> Vec<PathBuf> {
             }
         }
     }
-    dirs.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/lib")));
+    dirs.push(PathBuf::from(COMPILED_LIB_DIR));
     dirs.push(PathBuf::from("./lib"));
     dirs
 }
@@ -338,26 +398,41 @@ pub fn try_load_library(name: &LibraryName) -> Result<bool, EvalError> {
     // file's own directory. A compiled-in library claims the directory
     // it was compiled from, which exists in a development checkout and
     // fails cleanly where it doesn't.
-    let (source, path) = match found {
+    let (source, path, kind) = match found {
         LibrarySource::Disk(path) => {
             let source = crate::files::read_to_string(&path)
                 .map_err(|e| malformed(&format!("reading library ({}): {e}", name.join(" "))))?;
-            (std::borrow::Cow::Owned(source), path)
+            // The compiled-in `lib/` directory, found on disk in a
+            // development checkout, holds the standard libraries too.
+            let kind = if path.starts_with(COMPILED_LIB_DIR) {
+                LoadKind::Standard
+            } else {
+                LoadKind::User
+            };
+            (std::borrow::Cow::Owned(source), path, kind)
         }
         LibrarySource::Embedded { rel, text } => (
             std::borrow::Cow::Borrowed(text),
-            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/lib")).join(rel),
+            PathBuf::from(COMPILED_LIB_DIR).join(rel),
+            LoadKind::Standard,
         ),
     };
+    // Everything that can fail comes before the pushes below, so an error
+    // can't leave the load stacks pushed.
+    let root = loader_root()?;
     LOADING.with(|s| s.borrow_mut().push(name.clone()));
+    LOAD_KINDS.with(|k| k.borrow_mut().push(kind));
     let dir = path
         .parent()
         .map_or_else(|| PathBuf::from("."), PathBuf::from);
     push_load_dir(dir);
-    let result = crate::eval::eval_source(&source, loader_root()?);
+    let result = crate::eval::eval_source(&source, root);
     pop_load_dir();
     LOADING.with(|s| {
         s.borrow_mut().pop();
+    });
+    LOAD_KINDS.with(|k| {
+        k.borrow_mut().pop();
     });
     result?;
     // The file should have registered the library. If it named a
