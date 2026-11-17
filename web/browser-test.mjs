@@ -71,6 +71,14 @@ async function main() {
   await enter("(+ 1");
   await sleep(300);
   out.enterWaitsForBalance = src.value === "(+ 1" && !has(/› \\(\\+ 1\\n/);
+  // In the middle of a balanced entry (an example, a paste), Enter must
+  // add a line rather than evaluate it.
+  await idle();
+  src.value = "(+ 100 200)";
+  src.setSelectionRange(3, 3);
+  src.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await sleep(300);
+  out.enterMidEntryAddsALine = src.value === "(+ 100 200)" && !has(/⇒ 300/);
   await enter("(+ 1 2 3 4)");
   out.enterSubmitsBalanced = await until(() => has(/⇒ 10\\n/));
 
@@ -164,6 +172,7 @@ const EXPECT = {
   entryEchoedAndCleared: true,
   definitionsAccumulate: true,
   enterWaitsForBalance: true,
+  enterMidEntryAddsALine: true,
   enterSubmitsBalanced: true,
   historySteps: true,
   streamsWhileRunning: true,

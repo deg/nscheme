@@ -6,7 +6,7 @@
 >
 > The page now has two output limits: at most 1,000,000 characters per entry, and 2,000,000 for the whole transcript, beyond which the oldest output is removed and a marker says so. Without the second, a few stopped floods added up to several megabytes again.
 >
-> Enter evaluates only when the entry's parentheses balance. The page checks that itself (`isComplete`, which skips strings, comments, character literals and `|symbols|`), the same rule the CLI REPL applies to its input. Entries are echoed into the transcript, which scrolls inside its box and follows the end. The browser test grew to 24 steps: definitions accumulate, the Enter rule, history (with edits kept), Stop forgets definitions, two floods stay bounded, Reset clears the transcript, definitions and user libraries, and `exit` resets the session.
+> Enter evaluates only when the cursor is at the end of the entry and its parentheses balance; anywhere else it adds a line, because an example or a paste is already balanced and Enter in the middle of one must not evaluate it. The page checks that itself (`isComplete`, which skips strings, comments, character literals and `|symbols|`), the same rule the CLI REPL applies to its input. Entries are echoed into the transcript, which scrolls inside its box and follows the end. The browser test grew to 24 steps: definitions accumulate, the Enter rule, history (with edits kept), Stop forgets definitions, two floods stay bounded, Reset clears the transcript, definitions and user libraries, and `exit` resets the session.
 
 **Status:** Accepted (2026-11-17) **Bead:** nscheme-yd0.2.2 (Browser demo runs in a Web Worker with a Stop button), parent nscheme-yd0.2 (Browser playground) **Related:** [0012 — Running in a web browser](0012-browser-target.md)
 

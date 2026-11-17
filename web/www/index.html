@@ -210,7 +210,7 @@ const timing = document.getElementById("timing");
 
 const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
 document.getElementById("help").textContent =
-  `Enter evaluates when the parentheses balance · Shift+Enter adds a line · ` +
+  `Enter at the end evaluates when the parentheses balance · Shift+Enter adds a line · ` +
   `${mod}+Enter always evaluates · ${mod}+↑/↓ steps through earlier entries`;
 
 for (const name of Object.keys(EXAMPLES)) select.add(new Option(name, name));
@@ -478,6 +478,13 @@ function reset() {
   line("[reset: fresh definitions; your libraries reload on their next import]\n", "note");
 }
 
+// Whether the cursor sits at the end of the entry (trailing blanks
+// aside), with nothing selected.
+function cursorAtEnd() {
+  const { selectionStart, selectionEnd, value } = source;
+  return selectionStart === selectionEnd && value.slice(selectionEnd).trim() === "";
+}
+
 function stepHistory(delta) {
   const next = historyIndex + delta;
   if (next < 0 || next > history.length) return;
@@ -499,9 +506,12 @@ source.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && withMod) {
     e.preventDefault();
     submit();
-  } else if (e.key === "Enter" && !e.shiftKey && !e.altKey && idle && isComplete(source.value)) {
-    // (While an entry runs, Enter just adds a line, so the next entry
-    // can be typed.)
+  } else if (e.key === "Enter" && !e.shiftKey && !e.altKey && idle && cursorAtEnd() &&
+             isComplete(source.value)) {
+    // Only at the end: an example or a paste is already balanced, so
+    // Enter in the middle of one must add a line, not evaluate it. (And
+    // while an entry runs, Enter just adds a line, so the next entry can
+    // be typed.)
     e.preventDefault();
     submit();
   } else if (withMod && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
