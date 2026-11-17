@@ -77,7 +77,7 @@ use thiserror::Error;
 
 use crate::env::{Env, EnvRef};
 use crate::parse::{ParseError, parse_program};
-use crate::value::{ErrorKind, ErrorObject, Pair, Procedure, RuntimeError, Symbol, Value};
+use crate::value::{ErrorKind, ErrorObject, Procedure, RuntimeError, Symbol, Value};
 
 /// Convert a [`RuntimeError`] (raised by a primitive) into a Scheme
 /// error-object Value, so it can flow through the R7RS exception
@@ -3398,12 +3398,9 @@ impl Iterator for ListIter {
                 None
             }
             Value::Pair(p) => {
-                let Pair { car, cdr } = {
+                let (car, cdr) = {
                     let cell = p.borrow();
-                    Pair {
-                        car: cell.car.clone(),
-                        cdr: cell.cdr.clone(),
-                    }
+                    (cell.car.clone(), cell.cdr.clone())
                 };
                 self.current = cdr;
                 Some(Ok(car))
