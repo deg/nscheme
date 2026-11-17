@@ -31,6 +31,7 @@ use std::rc::Rc;
 
 use nscheme::env::{Env, EnvRef};
 use nscheme::eval::{EvalError, eval_source};
+use nscheme::files::{FileChange, FileObserver, MemoryFileSystem, set_file_system};
 use nscheme::value::Value;
 use wasm_bindgen::prelude::*;
 
@@ -140,6 +141,104 @@ impl Interpreter {
 #[wasm_bindgen(js_name = forgetUserLibraries)]
 pub fn forget_user_libraries() {
     nscheme::library::forget_user_libraries();
+}
+
+// ---------------------------------------------------------------------
+// Saved files (bead nscheme-yd0.2.4, ADR 0014)
+// ---------------------------------------------------------------------
+//
+// The page owns the saved files (in IndexedDB); the interpreter sees an
+// in-memory copy. The Worker installs it once with `installFiles`, seeds
+// it with `putFile`, and passes on the page's saves and deletes the same
+// way. A program's own writes and deletes go the other way, through the
+// observer, so the page can save them.
+
+thread_local! {
+    /// The installed in-memory filesystem, kept to change it from outside.
+    static FILES: RefCell<Option<Rc<MemoryFileSystem>>> = const { RefCell::new(None) };
+}
+
+/// Install an empty in-memory filesystem as the one every Scheme file
+/// operation uses, calling `on_change("written", path, contents)` or
+/// `on_change("removed", path)` after each write or delete a program
+/// makes. `path` is normalized (`./a//b` is `a/b`).
+#[wasm_bindgen(js_name = installFiles)]
+pub fn install_files(on_change: &js_sys::Function) {
+    let on_change = on_change.clone();
+    install_files_with(Box::new(move |change| {
+        let (kind, path, contents) = match change {
+            FileChange::Written { path, contents } => {
+                ("written", path, JsValue::from_str(contents))
+            }
+            FileChange::Removed { path } => ("removed", path, JsValue::UNDEFINED),
+        };
+        // The page saves the change; a throwing callback just loses it.
+        let _ = on_change.call3(
+            &JsValue::NULL,
+            &JsValue::from_str(kind),
+            &JsValue::from_str(path),
+            &contents,
+        );
+    }));
+}
+
+/// [`install_files`] with a Rust observer, so it can be tested natively.
+pub fn install_files_with(observer: FileObserver) {
+    let fs = Rc::new(MemoryFileSystem::new().with_observer(observer));
+    set_file_system(Some(Box::new(Rc::clone(&fs))));
+    FILES.with(|slot| *slot.borrow_mut() = Some(fs));
+}
+
+/// Add or replace a file that is already saved (seeding, or a save from
+/// the page's Files panel): the observer isn't told, since the page has
+/// it. If the file is a library under `lib/`, forget the loaded copy so
+/// the next `import` reads the new text.
+#[wasm_bindgen(js_name = putFile)]
+pub fn put_file(path: &str, contents: &str) {
+    FILES.with(|slot| {
+        if let Some(fs) = slot.borrow().as_ref() {
+            fs.insert(path, contents);
+        }
+    });
+    forget_library_in(path);
+}
+
+/// Remove a file the page deleted, without telling the observer, and
+/// forget the library it held, if any. Returns whether it was there.
+#[wasm_bindgen(js_name = removeFile)]
+pub fn remove_file(path: &str) -> bool {
+    let removed = FILES.with(|slot| slot.borrow().as_ref().is_some_and(|fs| fs.discard(path)));
+    forget_library_in(path);
+    removed
+}
+
+/// If `path` is where the library loader would find a library
+/// (`lib/<name>.sld` or `.scm`, as `(import (<name>))` looks it up),
+/// forget that library.
+fn forget_library_in(path: &str) {
+    if let Some(name) = library_name_for(path) {
+        nscheme::library::forget_library(&name);
+    }
+}
+
+/// The library a file under `lib/` defines, by the loader's naming:
+/// `lib/mine/greet.sld` is `(mine greet)`.
+fn library_name_for(path: &str) -> Option<Vec<String>> {
+    let parts: Vec<&str> = path
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    let (&first, rest) = parts.split_first()?;
+    let (&file, dirs) = rest.split_last()?;
+    if first != "lib" {
+        return None;
+    }
+    let stem = file
+        .strip_suffix(".sld")
+        .or_else(|| file.strip_suffix(".scm"))?;
+    let mut name: Vec<String> = dirs.iter().map(|d| (*d).to_string()).collect();
+    name.push(stem.to_string());
+    Some(name)
 }
 
 /// What one [`Interpreter::run`] produced. At most one of `value`,
@@ -274,6 +373,74 @@ mod tests {
         let r = i.run("(with-output-to-string (lambda () (exit 1)))");
         assert_eq!(r.exit_code(), Some(1));
         assert_eq!(i.run(r#"(display "visible")"#).output(), "visible");
+    }
+
+    /// The Files panel round trip, natively: a program's write reaches the
+    /// observer (so the page can save it), a seeded file is readable, and
+    /// saving a library file again makes the next import read the new
+    /// text, which is why `put_file` forgets the loaded library.
+    #[test]
+    fn saved_files_reach_the_program_and_its_writes_reach_the_page() {
+        nscheme::library::set_search_path(vec!["lib".into()]);
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let log = Rc::clone(&changes);
+        install_files_with(Box::new(move |c| log.borrow_mut().push(c.clone())));
+        let i = interp();
+        i.run(r#"(call-with-output-file "./notes.txt" (lambda (p) (display "hi" p)))"#);
+        assert_eq!(
+            *changes.borrow(),
+            vec![FileChange::Written {
+                path: "notes.txt".into(),
+                contents: "hi".into()
+            }]
+        );
+        put_file("data.txt", "seeded");
+        let r = i.run(r#"(call-with-input-file "data.txt" read-line)"#);
+        assert_eq!(r.value().as_deref(), Some(r#""seeded""#));
+        let lib = |word: &str| {
+            format!(
+                "(define-library (mine greet) (export greeting) (import (scheme base)) \
+                 (begin (define greeting \"{word}\")))"
+            )
+        };
+        put_file("lib/mine/greet.sld", &lib("hello"));
+        assert_eq!(
+            i.run("(import (mine greet)) greeting").value().as_deref(),
+            Some(r#""hello""#)
+        );
+        put_file("lib/mine/greet.sld", &lib("bonjour"));
+        assert_eq!(
+            i.run("(import (mine greet)) greeting").value().as_deref(),
+            Some(r#""bonjour""#)
+        );
+        assert!(remove_file("data.txt"));
+        assert_eq!(
+            i.run(r#"(file-exists? "data.txt")"#).value().as_deref(),
+            Some("#f")
+        );
+        assert_eq!(
+            changes.borrow().len(),
+            1,
+            "page-side changes are not echoed back"
+        );
+        set_file_system(None);
+    }
+
+    /// The loader's naming, which decides which library a save forgets.
+    #[test]
+    fn library_files_map_to_library_names() {
+        assert_eq!(
+            library_name_for("lib/mine/greet.sld"),
+            Some(vec!["mine".into(), "greet".into()])
+        );
+        assert_eq!(
+            library_name_for("./lib/srfi/1.scm"),
+            Some(vec!["srfi".into(), "1".into()])
+        );
+        assert_eq!(library_name_for("lib/x.sld"), Some(vec!["x".into()]));
+        assert_eq!(library_name_for("notes.txt"), None);
+        assert_eq!(library_name_for("lib/readme.txt"), None);
+        assert_eq!(library_name_for("src/lib/x.sld"), None);
     }
 
     /// A fresh interpreter with the base library installed.

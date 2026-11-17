@@ -103,6 +103,24 @@ fn a_user_library_that_replaces_a_standard_one_is_forgotten() {
     assert!(!library_exists(&name(&["scheme", "box"])));
 }
 
+/// Forgetting one library (what the playground does when its file is
+/// saved from the Files panel) reloads just that one.
+#[test]
+fn forgetting_one_library_reloads_only_it() {
+    let fs = in_memory();
+    fs.insert("lib/mine/greet.sld", greet_library("hello"));
+    run("(define-library (scratch other) (export o) (import (scheme base)) (begin (define o 1)))")
+        .unwrap();
+    assert_eq!(greeting(), r#""hello""#);
+    fs.insert("lib/mine/greet.sld", greet_library("hi"));
+    assert!(nscheme::library::forget_library(&name(&["mine", "greet"])));
+    assert_eq!(greeting(), r#""hi""#);
+    assert!(
+        library_exists(&name(&["scratch", "other"])),
+        "only the one library is forgotten"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------

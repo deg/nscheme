@@ -132,7 +132,7 @@ node web/browser-test.mjs          # drives the page in headless Chrome
 python3 -m http.server -d web/www  # then open http://localhost:8000/
 ```
 
-The page is a REPL session: each entry is evaluated in the same environment, so definitions build up until you press Reset (or call `exit`). Reset gives fresh definitions and reloads your own libraries, but keeps the standard libraries cached, including any changes an entry made to them; Stop is the full restart. Entries run in a Web Worker, so output streams in as it is printed, and Stop ends one that goes on too long (and starts a new session). Console input reads as end-of-file, and there is no file system yet. See [ADR 0012](docs/0012-browser-target.md) and [ADR 0013](docs/0013-browser-playground.md).
+The page is a REPL session: each entry is evaluated in the same environment, so definitions build up until you press Reset (or call `exit`). Reset gives fresh definitions and reloads your own libraries, but keeps the standard libraries cached, including any changes an entry made to them; Stop is the full restart. Entries run in a Web Worker, so output streams in as it is printed, and Stop ends one that goes on too long (and starts a new session). Files your programs write are saved in the browser (IndexedDB) and listed in a Files panel, where you can also open, save, upload, download and delete them; a library saved as `lib/mine/greet.sld` imports as `(import (mine greet))`. Console input reads as end-of-file. See ADRs [0012](docs/0012-browser-target.md), [0013](docs/0013-browser-playground.md) and [0014](docs/0014-saved-files-in-the-browser.md).
 
 ## A short tour of Scheme
 
@@ -232,7 +232,7 @@ Tracked in the `bd` issue tracker, with deeper detail in [`docs/`](docs/):
 - `exit` does not run pending `dynamic-wind` after-thunks (`nscheme-zni`)
 - `make-parameter` ignores its converter procedure (`nscheme-x17`)
 - `force` turns a `raise` inside a promise into an error string, so handlers can't see the raised object (`nscheme-rsh`)
-- In the browser: no saved files yet (`nscheme-yd0.2.4`), and no console input (`nscheme-yd0.3`)
+- In the browser: no console input (`nscheme-yd0.3`)
 
 ## Design
 
@@ -251,6 +251,7 @@ See [`docs/`](docs/) for architecture decision records:
 - 0011 — Error diagnostics: source locations and backtraces
 - 0012 — Running in a web browser (WebAssembly)
 - 0013 — The browser playground: a Worker, streamed output, Stop
+- 0014 — Saved files in the browser
 
 ADR 0001 is the load-bearing one: it explains why the evaluator is a step-loop with continuation frames rather than recursive `eval` calls, and why that choice makes TCO and `call/cc` cheap.
 
@@ -262,7 +263,7 @@ ADR 0001 is the load-bearing one: it explains why the evaluator is a step-loop w
 cargo test --workspace
 ```
 
-That runs about **718 tests across ~51 files** in a few seconds (plain `cargo test` skips the browser wrapper's 7) (the slow SRFI 132 sort suite is `#[ignore]`d — run it with `-- --ignored`). The suite covers each module's unit tests, end-to-end integration tests (evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters), the in-house R7RS conformance corpus, and the R7RS-large reference-suite harness described below.
+That runs about **721 tests across ~51 files** in a few seconds (plain `cargo test` skips the browser wrapper's 9) (the slow SRFI 132 sort suite is `#[ignore]`d — run it with `-- --ignored`). The suite covers each module's unit tests, end-to-end integration tests (evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters), the in-house R7RS conformance corpus, and the R7RS-large reference-suite harness described below.
 
 ### R7RS-large reference suites
 

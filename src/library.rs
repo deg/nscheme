@@ -171,6 +171,15 @@ pub fn register_library(name: LibraryName, bindings: HashMap<Symbol, Cell>) {
     LIBRARIES.with(|r| r.borrow_mut().insert(name, bindings));
 }
 
+/// Forget one registered library, so the next `import` of it reloads it
+/// from its source; returns whether it was registered. The browser
+/// playground calls this when the user saves or deletes the library's
+/// file from its Files panel (bead nscheme-yd0.2.4).
+pub fn forget_library(name: &LibraryName) -> bool {
+    STANDARD.with(|s| s.borrow_mut().remove(name));
+    LIBRARIES.with(|r| r.borrow_mut().remove(name).is_some())
+}
+
 /// Forget every registered library except the standard ones (those
 /// loaded from the copy of `lib/` compiled into the binary), so the next
 /// `import` of any other reloads it from its source. Environments that

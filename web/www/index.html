@@ -121,6 +121,25 @@
   .toolbar .hint { margin-left: auto; }
   footer { color: var(--muted); font-size: 0.85rem; margin-top: 24px; }
   footer a { color: inherit; }
+  /* The Files panel (nscheme-yd0.2.4): a disclosure under the toolbar. */
+  .files { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .files summary { cursor: pointer; color: var(--muted); font-size: 0.9rem; }
+  .files-list {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 4px 16px;
+    align-items: baseline;
+    margin: 10px 0;
+    font-size: 0.9rem;
+  }
+  .files-list .path { font-family: var(--mono); overflow-wrap: anywhere; }
+  .files-list .size { color: var(--muted); text-align: right; }
+  .files-list .actions button {
+    border: none; background: none; padding: 0 4px;
+    color: var(--accent); font-size: 0.85rem; cursor: pointer;
+  }
+  .files-list .empty { grid-column: 1 / -1; color: var(--muted); }
+  .files-actions { display: flex; gap: 8px; }
 </style>
 </head>
 <body>
@@ -146,10 +165,23 @@
     <span class="hint" id="timing"></span>
   </div>
 
+  <details class="files" id="files">
+    <summary id="files-summary">Files</summary>
+    <div class="files-list" id="files-list"></div>
+    <div class="files-actions">
+      <button id="save-as">Save input as…</button>
+      <button id="upload">Upload…</button>
+      <input type="file" id="upload-input" multiple hidden>
+    </div>
+    <p class="help">Files your programs write are saved in this browser. Run one with
+      <code>(load "prog.scm")</code>; a library saved as <code>lib/mine/greet.sld</code> is
+      <code>(import (mine greet))</code>.</p>
+  </details>
+
   <footer>
     <p>Every entry is evaluated in the same session, so definitions build up until you press
       Reset. Entries run in the background: Stop ends one that runs too long, and starts a
-      new session. There is no keyboard input or file system yet.</p>
+      new session. Files are saved in this browser; there is no keyboard input yet.</p>
     <p>© 2026 David Goldfarb, <a href="mailto:deg@degel.com">deg@degel.com</a></p>
     <p>Source code on <a href="https://github.com/deg/nscheme">GitHub</a>.</p>
   </footer>
@@ -200,6 +232,11 @@ const EXAMPLES = {
     (display i)
     (newline))
   (loop (+ i 1)))`,
+  "Saved files": `; Files your programs write are saved in this browser:
+; open Files, below, to see them. They outlast Reset, Stop and reloads.
+(call-with-output-file "greeting.txt"
+  (lambda (port) (display "Hello, file!" port)))
+(call-with-input-file "greeting.txt" read-line)`,
   "An error": `(define (average lst)
   (/ (apply + lst) (length lst)))
 
@@ -260,7 +297,7 @@ let trimmedMarker = null;
 
 // The message protocol this page speaks; the worker reports its own in
 // "ready" (see worker.js).
-const PROTOCOL = 3;
+const PROTOCOL = 4;
 
 // The build id (see web/build.sh), fetched uncached so a new deploy's
 // worker is never served from a browser's cached copy of an old one.
@@ -282,6 +319,12 @@ function updateButtons() {
   evalButton.disabled = !ready || current !== null;
   resetButton.disabled = !ready || current !== null;
   stopButton.disabled = current === null;
+  // The Files panel can't change files while an entry runs: the worker
+  // would apply the change only after the entry, so a write the entry
+  // makes meanwhile would leave the page and the worker disagreeing.
+  for (const b of document.querySelectorAll("#save-as, #upload, #files-list [data-action=delete]")) {
+    b.disabled = current !== null;
+  }
 }
 
 function unavailable(message) {
@@ -300,6 +343,8 @@ function onWorkerMessage(msg) {
                     "have just been published)");
         break;
       }
+      // Seed the new worker with the saved files before any entry.
+      worker.postMessage({ type: "files", files: [...files] });
       ready = true;
       evalButton.textContent = "Evaluate";
       updateButtons();
@@ -324,6 +369,12 @@ function onWorkerMessage(msg) {
     case "broken":
       line(`The interpreter failed during a reset (${msg.message}); restarting it.\n`, "error");
       restart();
+      break;
+    case "file-written":
+      saveFile(msg.path, msg.text);
+      break;
+    case "file-removed":
+      dropFile(msg.path);
       break;
   }
 }
@@ -542,6 +593,220 @@ source.addEventListener("keydown", (e) => {
     stepHistory(e.key === "ArrowUp" ? -1 : 1);
   }
 });
+
+// ---------------------------------------------------------------------
+// Saved files (nscheme-yd0.2.4, ADR 0014). The page owns them: they live
+// in IndexedDB and in `files`, and each worker gets a copy when it starts.
+// A program's writes come back as file-written / file-removed messages;
+// the Files panel's changes go to the worker as put-file / delete-file.
+
+// Open the database, or fail within OPEN_TIMEOUT_MS: an open can hang
+// (another tab holding it, browser quirks), and the interpreter must
+// still start, with files kept for this visit only.
+const OPEN_TIMEOUT_MS = 2000;
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("it did not open in time")), OPEN_TIMEOUT_MS);
+    const fail = (e) => { clearTimeout(timer); reject(e); };
+    try {
+      const req = indexedDB.open("nscheme", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("files", { keyPath: "path" });
+      req.onsuccess = () => { clearTimeout(timer); resolve(req.result); };
+      req.onerror = () => fail(req.error);
+      req.onblocked = () => fail(new Error("another tab is holding it"));
+    } catch (e) {
+      fail(e);
+    }
+  });
+}
+
+// Run one request against the files store; resolves when it commits, and
+// rejects if it fails or is aborted (a quota failure aborts at commit).
+function inStore(mode, request) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("files", mode);
+    const req = request(tx.objectStore("files"));
+    tx.oncomplete = () => resolve(req.result);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new Error("the save was aborted"));
+  });
+}
+
+function storageFailed(e) {
+  line(`Could not save to this browser's storage: ${e && e.message || e}\n`, "error");
+}
+
+// The paths the interpreter uses: "./a//b" and "a/c/../b" are "a/b".
+function normalizePath(path) {
+  const out = [];
+  for (const part of path.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") out.pop(); else out.push(part);
+  }
+  return out.join("/");
+}
+
+// Why `path` can't be saved, or null. A path can't be both a file and a
+// directory, as on a disk.
+function pathProblem(path) {
+  if (!path) return "an empty name";
+  for (const other of files.keys()) {
+    if (path.startsWith(other + "/")) return `${other} is a file, not a directory`;
+    if (other.startsWith(path + "/")) return `${path} is a directory`;
+  }
+  return null;
+}
+
+function saveFile(path, text) {
+  files.set(path, text);
+  scheduleRender();
+  if (db) inStore("readwrite", (store) => store.put({ path, text })).then(showUsage, storageFailed);
+  // Ask the browser not to evict the saved files under storage pressure.
+  if (!persistAsked) {
+    persistAsked = true;
+    navigator.storage?.persist?.();
+  }
+}
+
+function dropFile(path) {
+  files.delete(path);
+  scheduleRender();
+  if (db) inStore("readwrite", (store) => store.delete(path)).then(showUsage, storageFailed);
+}
+
+// A save from the page: keep it, and tell the worker (a worker that is
+// still starting gets it with the rest when it is ready).
+function saveFromPage(path, text) {
+  if (current) return false;
+  const problem = pathProblem(path);
+  if (problem) {
+    alert(`Can't save ${path || "that"}: ${problem}.`);
+    return false;
+  }
+  saveFile(path, text);
+  if (ready) worker.postMessage({ type: "put-file", path, text });
+  return true;
+}
+
+function formatSize(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+const encoder = new TextEncoder();
+const filesList = document.getElementById("files-list");
+const filesSummary = document.getElementById("files-summary");
+let usage = "";
+
+// Redraw the list at most once per frame: a program writing many files
+// would otherwise redraw it (re-measuring every file) on each write.
+let renderPending = false;
+function scheduleRender() {
+  if (renderPending) return;
+  renderPending = true;
+  requestAnimationFrame(() => { renderPending = false; renderFiles(); });
+}
+
+function renderFiles() {
+  filesSummary.textContent = `Files (${files.size})${usage ? ` · ${usage}` : ""}`;
+  filesList.replaceChildren();
+  if (files.size === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "No saved files yet.";
+    filesList.append(empty);
+    return;
+  }
+  for (const path of [...files.keys()].sort()) {
+    const name = document.createElement("div");
+    name.className = "path";
+    name.textContent = path;
+    const size = document.createElement("div");
+    size.className = "size";
+    size.textContent = formatSize(encoder.encode(files.get(path)).length);
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    for (const [label, act] of [["Open", openFile], ["Download", downloadFile], ["Delete", deleteFile]]) {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.dataset.action = label.toLowerCase();
+      b.addEventListener("click", () => act(path));
+      if (label === "Delete") b.disabled = current !== null;
+      actions.append(b);
+    }
+    filesList.append(name, size, actions);
+  }
+}
+
+// The storage the site uses, checked at most once a second.
+let usageCheckedAt = -Infinity;
+function showUsage() {
+  const now = performance.now();
+  if (now - usageCheckedAt < 1000) return;
+  usageCheckedAt = now;
+  navigator.storage?.estimate?.().then((e) => {
+    usage = `${formatSize(e.usage ?? 0)} used`;
+    scheduleRender();
+  }, () => {});
+}
+
+function openFile(path) {
+  source.value = files.get(path);
+  lastOpened = path;
+  historyIndex = history.length;
+  edits.clear();
+  source.focus();
+}
+
+function downloadFile(path) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([files.get(path)], { type: "text/plain" }));
+  a.download = path.split("/").pop();
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+
+function deleteFile(path) {
+  if (current || !confirm(`Delete ${path}?`)) return;
+  dropFile(path);
+  if (ready) worker.postMessage({ type: "delete-file", path });
+}
+
+document.getElementById("save-as").addEventListener("click", () => {
+  const answer = prompt("Save the input as:", lastOpened ?? "untitled.scm");
+  if (answer === null) return;
+  const path = normalizePath(answer.trim());
+  if (saveFromPage(path, source.value)) lastOpened = path;
+});
+
+const uploadInput = document.getElementById("upload-input");
+document.getElementById("upload").addEventListener("click", () => uploadInput.click());
+uploadInput.addEventListener("change", async () => {
+  for (const file of uploadInput.files) saveFromPage(normalizePath(file.name), await file.text());
+  uploadInput.value = "";
+});
+
+const files = new Map(); // path -> text
+let lastOpened = null;
+let persistAsked = false;
+let db = null;
+try {
+  db = await openDb();
+  const saved = await inStore("readonly", (store) => store.getAll());
+  // A path can't be both a file and a directory; two tabs saving at once
+  // can still store such a pair. Load the first, and say which was left.
+  for (const { path, text } of saved.sort((a, b) => (a.path < b.path ? -1 : 1))) {
+    const problem = pathProblem(path);
+    if (problem) line(`[A saved file was not loaded: ${path} (${problem})]\n`, "note");
+    else files.set(path, text);
+  }
+} catch (e) {
+  db = null;
+  usage = `not saved: this browser's storage is unavailable (${e && e.message || e})`;
+}
+renderFiles();
+if (db) showUsage();
 
 startWorker();
 </script>

@@ -108,6 +108,7 @@ async function main() {
   await go("(let loop ((i 0)) (when (= 0 (remainder i 200000)) (display i) (newline)) (loop (+ i 1)))");
   out.streamsWhileRunning = await until(() => has(/\\n200000\\n/));
   out.stopEnabledWhileRunning = !stop.disabled && reset.disabled;
+  out.panelLockedWhileRunning = d.getElementById("save-as").disabled && d.getElementById("upload").disabled;
   stop.click();
   out.stopped = await until(() => has(/\\[stopped; the session's definitions are gone\\]/));
   await go("(sq 3)");
@@ -167,6 +168,45 @@ async function main() {
   await go("(* 7 8)");
   out.runsAfterCrash = await until(() => has(/⇒ 56/), 40000);
 
+  // Saved files (nscheme-yd0.2.4). The page's dialogs are stubbed: the
+  // Save-as prompt answers with a path, Delete is confirmed.
+  w.prompt = () => "lib/mine/greet.sld";
+  w.confirm = () => true;
+  w.alert = (m) => { out.unexpectedAlert = m; };
+  const filesPanel = () => d.getElementById("files-list").textContent;
+  await go('(call-with-output-file "notes.txt" (lambda (p) (display "Hello, file!" p)))');
+  out.programWriteListed = await until(() => /notes\\.txt/.test(filesPanel()));
+  await go("(let loop () (loop))");
+  await sleep(300);
+  stop.click();
+  await go('(call-with-input-file "notes.txt" read-line)');
+  out.fileSurvivesStop = await until(() => has(/⇒ "Hello, file!"/));
+  const lib = (word) => "(define-library (mine greet) (export greeting) (import (scheme base)) " +
+    '(begin (define greeting "' + word + '")))';
+  await idle();
+  src.value = lib("hello");
+  d.getElementById("save-as").click();
+  await go("(import (mine greet)) greeting");
+  out.savedLibraryImports = await until(() => has(/⇒ "hello"/));
+  await idle();
+  src.value = lib("bonjour");
+  d.getElementById("save-as").click();
+  await go("(import (mine greet)) greeting");
+  out.editedLibraryReloads = await until(() => has(/⇒ "bonjour"/));
+  const notesRow = [...d.querySelectorAll("#files-list .path")].find((e) => e.textContent === "notes.txt");
+  notesRow.nextElementSibling.nextElementSibling.querySelector('[data-action="delete"]').click();
+  await go('(if (file-exists? "notes.txt") (quote still-there) (quote gone))');
+  out.panelDeleteSeen = await until(() => has(/⇒ gone/));
+  const upload = new w.DataTransfer();
+  upload.items.add(new w.File(["(define uploaded 42)"], "prog.scm"));
+  const input = d.getElementById("upload-input");
+  input.files = upload.files;
+  input.dispatchEvent(new w.Event("change"));
+  await until(() => /prog\\.scm/.test(filesPanel()));
+  await go('(load "prog.scm") uploaded');
+  out.uploadLoads = await until(() => has(/⇒ 42/));
+  out.noAlerts = out.unexpectedAlert === undefined;
+
   // A cached worker from an older deploy speaks an older protocol: the
   // page must say so, not hang (nscheme-yd0.2.5). The test server can
   // serve such a worker; Stop makes the page start a new one.
@@ -176,6 +216,19 @@ async function main() {
   stop.click();
   out.staleWorkerReported = await until(() => has(/out of step/));
   await fetch("/__stale-worker/off");
+
+  // Saved files outlast a reload: they come back from IndexedDB.
+  f.contentWindow.location.reload();
+  await sleep(500);
+  const fresh = () => f.contentDocument;
+  await until(() => fresh().getElementById("evaluate")?.textContent === "Evaluate" &&
+    !fresh().getElementById("evaluate").disabled);
+  const panelAfter = fresh().getElementById("files-list").textContent;
+  out.filesSurviveReload = /lib\\/mine\\/greet\\.sld/.test(panelAfter) && /prog\\.scm/.test(panelAfter) &&
+    !/notes\\.txt/.test(panelAfter);
+  fresh().getElementById("source").value = '(load "prog.scm") uploaded';
+  fresh().getElementById("evaluate").click();
+  out.reloadedFileLoads = await until(() => /⇒ 42/.test(fresh().getElementById("output").textContent));
   document.getElementById("result").textContent = "RESULT " + JSON.stringify(out);
 }
 main().catch(e => { document.getElementById("result").textContent = "RESULT " + JSON.stringify({ error: String(e) }); });
@@ -193,6 +246,7 @@ const EXPECT = {
   historySteps: true,
   streamsWhileRunning: true,
   stopEnabledWhileRunning: true,
+  panelLockedWhileRunning: true,
   stopped: true,
   stopForgetsDefinitions: true,
   stopsAFlood: true,
@@ -208,7 +262,18 @@ const EXPECT = {
   crashReported: true,
   outputBeforeCrashShown: true,
   runsAfterCrash: true,
+  programWriteListed: true,
+  fileSurvivesStop: true,
+  savedLibraryImports: true,
+  editedLibraryReloads: true,
+  panelDeleteSeen: true,
+  uploadLoads: true,
+  noAlerts: true,
   staleWorkerReported: true,
+  filesSurviveReload: true,
+  reloadedFileLoads: true,
+  noStorageStillRuns: true,
+  noStorageSaysSo: true,
 };
 
 // The harness is a string, so a typo in it would only show as a run
@@ -320,6 +385,32 @@ try {
     const [text, soFar] = JSON.parse(r.result?.result?.value ?? "[]");
     partial = soFar;
     if (text?.startsWith("RESULT ")) result = JSON.parse(text.slice(7));
+  }
+  // A second pass: IndexedDB that never answers (another tab holding
+  // it, a browser quirk) must not stop the interpreter. The page should
+  // give up on storage, say files aren't saved, and run entries anyway.
+  if (result) {
+    await send("Page.enable");
+    await send("Page.addScriptToEvaluateOnNewDocument", {
+      source: "Object.defineProperty(window, 'indexedDB', { value: { open() { return {}; } }, configurable: true });",
+    });
+    await send("Page.navigate", { url: `http://127.0.0.1:${port}/index.html` });
+    const evaluate = async (expression) =>
+      (await send("Runtime.evaluate", { expression, awaitPromise: true })).result?.result?.value;
+    let started = false;
+    for (let i = 0; i < 40 && !started; i++) {
+      await sleep(250);
+      started = await evaluate("document.getElementById('evaluate')?.textContent === 'Evaluate' && !document.getElementById('evaluate').disabled");
+    }
+    result.noStorageStillRuns = false;
+    if (started) {
+      await evaluate("document.getElementById('source').value = '(+ 1 2)'; document.getElementById('evaluate').click()");
+      for (let i = 0; i < 40 && !result.noStorageStillRuns; i++) {
+        await sleep(250);
+        result.noStorageStillRuns = /⇒ 3/.test(await evaluate("document.getElementById('output').textContent"));
+      }
+    }
+    result.noStorageSaysSo = /not saved/.test(await evaluate("document.getElementById('files-summary').textContent") ?? "");
   }
   ws.close();
 } catch (e) {

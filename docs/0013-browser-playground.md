@@ -1,5 +1,7 @@
 # ADR 0013 — The browser playground: a Worker, streamed output, Stop
 
+> **Update (2026-11-17, nscheme-yd0.2.4):** saved files (IndexedDB, a Files panel, importable libraries) are in [0014 — Saved files in the browser](0014-saved-files-in-the-browser.md). The Worker protocol went to 4: `files`, `put-file`, `delete-file` from the page; `file-written`, `file-removed` from the Worker.
+
 > **Update (2026-11-17, nscheme-yd0.2.5): versioned Worker files.** GitHub Pages serves every file with `cache-control: max-age=600`. After the REPL deploy, a browser loaded the new page with a cached Worker from the previous deploy, which spoke the older protocol. That Worker ignored the page's `eval` messages, so the first entry hung forever. A hard reload didn't help, since the Worker's own fetches don't get the page's cache bypass; a private window did. Two fixes:
 > - `web/build.sh` writes `pkg/build.json`, holding a hash of `worker.js`, the wasm glue and the wasm. The page fetches it uncached and loads `worker.js?v=<id>`, and the Worker loads the glue and the wasm with the same `?v=`. Each build's files therefore have their own URLs, and no cache can mix builds.
 > - As a backstop, the Worker reports a protocol number in `ready` and answers any request it doesn't understand. If the page and the Worker disagree, the page says they are out of step and asks for a reload, instead of hanging.
