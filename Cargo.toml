@@ -5,6 +5,12 @@ edition = "2024"
 description = "An R7RS Scheme interpreter written in Rust (R7RS-small core plus R7RS-large libraries)"
 license = "MIT OR Apache-2.0"
 publish = false
+build = "build.rs"
+
+# The browser wrapper (bead nscheme-yd0.1) is a separate crate: the
+# wasm-bindgen glue it generates needs `unsafe`, which this crate forbids.
+[workspace]
+members = [".", "web"]
 
 [lib]
 name = "nscheme"
@@ -16,12 +22,18 @@ path = "src/main.rs"
 
 [dependencies]
 thiserror = "2"
-rustyline = "14"
 num-bigint = "0.4"
 num-rational = { version = "0.4", default-features = false, features = ["num-bigint"] }
 num-traits = "0.2"
 num-integer = "0.1"
 ryu = "1"
+# `std::time::SystemTime::now()` panics on wasm32-unknown-unknown; web-time
+# re-exports std::time natively and uses `performance.now()` in a browser.
+web-time = "1"
+
+# The REPL line editor is CLI-only and does not compile for wasm.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rustyline = "14"
 
 [dev-dependencies]
 

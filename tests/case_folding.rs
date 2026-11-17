@@ -35,17 +35,32 @@ fn full_folding_one_to_many() {
 #[test]
 fn simple_char_folding_stays_one_char() {
     // ß's simple fold is itself (its full fold "ss" is multi-char).
-    assert!(equal(&run("(char-foldcase #\\x00df)").unwrap(), &Value::Char('\u{df}')));
-    assert!(equal(&run("(char-foldcase #\\A)").unwrap(), &Value::Char('a')));
+    assert!(equal(
+        &run("(char-foldcase #\\x00df)").unwrap(),
+        &Value::Char('\u{df}')
+    ));
+    assert!(equal(
+        &run("(char-foldcase #\\A)").unwrap(),
+        &Value::Char('a')
+    ));
     // A Greek capital folds 1->1.
-    assert!(equal(&run("(char-foldcase #\\x3a3)").unwrap(), &Value::Char('\u{3c3}')));
+    assert!(equal(
+        &run("(char-foldcase #\\x3a3)").unwrap(),
+        &Value::Char('\u{3c3}')
+    ));
 }
 
 #[test]
 fn ci_comparisons_use_folding() {
     // The canonical CaseFolding.txt example: "Fuß" matches "FUSS".
-    assert!(equal(&run("(string-ci=? \"Stra\u{df}e\" \"STRASSE\")").unwrap(), &Value::Bool(true)));
-    assert!(equal(&run("(char-ci=? #\\A #\\a)").unwrap(), &Value::Bool(true)));
+    assert!(equal(
+        &run("(string-ci=? \"Stra\u{df}e\" \"STRASSE\")").unwrap(),
+        &Value::Bool(true)
+    ));
+    assert!(equal(
+        &run("(char-ci=? #\\A #\\a)").unwrap(),
+        &Value::Bool(true)
+    ));
 }
 
 #[test]

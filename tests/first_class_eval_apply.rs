@@ -16,10 +16,16 @@ fn run(src: &str) -> Result<Value, EvalError> {
 
 fn eq(expr: &str, expected: &str) {
     let v = run(&format!("(equal? {expr} {expected})")).unwrap();
-    assert!(equal(&v, &Value::Bool(true)), "{expr} should equal {expected}");
+    assert!(
+        equal(&v, &Value::Bool(true)),
+        "{expr} should equal {expected}"
+    );
 }
 fn truthy(expr: &str) {
-    assert!(equal(&run(expr).unwrap(), &Value::Bool(true)), "{expr} should be #t");
+    assert!(
+        equal(&run(expr).unwrap(), &Value::Bool(true)),
+        "{expr} should be #t"
+    );
 }
 
 #[test]
@@ -32,7 +38,10 @@ fn apply_basic_and_spread() {
 #[test]
 fn apply_is_a_value() {
     truthy("(procedure? apply)");
-    eq("(map (lambda (xs) (apply + xs)) '((1 2) (3 4) (5 6)))", "'(3 7 11)");
+    eq(
+        "(map (lambda (xs) (apply + xs)) '((1 2) (3 4) (5 6)))",
+        "'(3 7 11)",
+    );
     // apply applied via apply:
     eq("(apply apply (list + '(1 2 3)))", "6");
 }
@@ -41,9 +50,15 @@ fn apply_is_a_value() {
 fn eval_basic_and_value() {
     truthy("(procedure? eval)");
     eq("(eval '(* 7 3) (environment '(scheme base)))", "21");
-    eq("(map (lambda (e) (eval e (environment '(scheme base)))) '((+ 1 1) (* 2 3)))", "'(2 6)");
+    eq(
+        "(map (lambda (e) (eval e (environment '(scheme base)))) '((+ 1 1) (* 2 3)))",
+        "'(2 6)",
+    );
     // apply + eval together:
-    eq("(apply eval (list '(+ 2 2) (environment '(scheme base))))", "4");
+    eq(
+        "(apply eval (list '(+ 2 2) (environment '(scheme base))))",
+        "4",
+    );
 }
 
 #[test]
@@ -53,7 +68,7 @@ fn load_is_a_procedure() {
 
 #[test]
 fn arity_and_type_errors_are_catchable() {
-    truthy("(guard (e (#t #t)) (apply +))");          // too few args
-    truthy("(guard (e (#t #t)) (apply + 1 2 3))");    // last arg not a list
-    truthy("(guard (e (#t #t)) (eval))");             // eval arity
+    truthy("(guard (e (#t #t)) (apply +))"); // too few args
+    truthy("(guard (e (#t #t)) (apply + 1 2 3))"); // last arg not a list
+    truthy("(guard (e (#t #t)) (eval))"); // eval arity
 }

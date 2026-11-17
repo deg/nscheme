@@ -1,0 +1,9 @@
+# The browser build (bead nscheme-yd0.1, ADR 0012). The reader and printer
+# recurse on nesting depth, and wasm's default 1MB stack overflowed at about
+# 2,200 levels of nested list (native release: about 9,500, on an 8MB main
+# thread). With 8MB the limit in Node/V8 rose to about 4,800, where the JS
+# engine's own call stack runs out instead, which a page cannot raise.
+# A RUSTFLAGS environment variable replaces this setting entirely;
+# web/smoke.mjs fails if that happens.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=8388608"]

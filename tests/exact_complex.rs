@@ -18,12 +18,18 @@ fn run(src: &str) -> Result<Value, EvalError> {
 /// Assert `expr` is `equal?` to `expected` (also Scheme source).
 fn eq(expr: &str, expected: &str) {
     let v = run(&format!("(equal? {expr} {expected})")).unwrap();
-    assert!(equal(&v, &Value::Bool(true)), "{expr} should equal {expected}");
+    assert!(
+        equal(&v, &Value::Bool(true)),
+        "{expr} should equal {expected}"
+    );
 }
 
 /// Assert `expr` evaluates to #t.
 fn truthy(expr: &str) {
-    assert!(equal(&run(expr).unwrap(), &Value::Bool(true)), "{expr} should be #t");
+    assert!(
+        equal(&run(expr).unwrap(), &Value::Bool(true)),
+        "{expr} should be #t"
+    );
 }
 
 #[test]

@@ -67,10 +67,7 @@ fn build_base_env() -> Result<EnvRef, EvalError> {
 }
 
 fn print_usage() {
-    eprintln!(
-        "nscheme {} — R7RS Scheme interpreter",
-        nscheme::VERSION
-    );
+    eprintln!("nscheme {} — R7RS Scheme interpreter", nscheme::VERSION);
     eprintln!();
     eprintln!("Usage:");
     eprintln!("    nscheme              start the interactive REPL");
@@ -80,31 +77,17 @@ fn print_usage() {
     eprintln!("    nscheme -h, --help   show this message");
 }
 
-/// Print an evaluation error to stderr, adding a source location
-/// (`line:col` + caret) for parse/lex errors, which carry a span into
-/// `source` (bead nscheme-tn3).
+/// Print an evaluation error to stderr, with its source location and
+/// call trace (bead nscheme-tn3). The formatting lives in the library so
+/// the browser wrapper reports errors the same way.
 fn report_error(source: &str, e: &EvalError) {
-    // Always drain the call-chain backtrace so a stale one can't leak to
-    // a later (e.g. parse) error.
-    let trace = nscheme::eval::take_backtrace();
-    if let EvalError::Parse(pe) = e {
-        if let Some(span) = pe.span() {
-            let loc = nscheme::diagnostic::locate(source, span);
-            if !loc.is_empty() {
-                eprintln!("error: {pe}\n{loc}");
-                return;
-            }
-        }
-        eprintln!("error: {e}");
-        return;
-    }
-    eprintln!("error: {e}");
-    if let Some(loc) = nscheme::diagnostic::current_location() {
-        eprintln!("{loc}");
-    }
-    if !trace.is_empty() {
-        eprintln!("  call trace (innermost first): {}", trace.join(" <- "));
-    }
+    eprintln!("{}", nscheme::diagnostic::format_error(source, e));
+}
+
+/// The process status for a Scheme `(exit code)`. Like a Unix exit
+/// status, only the low 8 bits survive.
+fn exit_status(code: i32) -> ExitCode {
+    ExitCode::from(u8::try_from(code.rem_euclid(256)).unwrap_or(1))
 }
 
 fn run_expr(env: &EnvRef, source: &str) -> ExitCode {
@@ -113,6 +96,7 @@ fn run_expr(env: &EnvRef, source: &str) -> ExitCode {
             print_value(&v);
             ExitCode::SUCCESS
         }
+        Err(EvalError::Exit(code)) => exit_status(code),
         Err(e) => {
             report_error(source, &e);
             ExitCode::from(1)
@@ -128,27 +112,31 @@ fn run_file(env: &EnvRef, path: &Path) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if let Err(e) = eval_source(&source, env.clone()) {
-        report_error(&source, &e);
-        return ExitCode::from(1);
+    match eval_source(&source, env.clone()) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(EvalError::Exit(code)) => exit_status(code),
+        Err(e) => {
+            report_error(&source, &e);
+            ExitCode::from(1)
+        }
     }
-    ExitCode::SUCCESS
 }
 
 /// `nscheme -i FILE...` — evaluate each FILE into `env` (so its
 /// definitions stay live), then hand that same env to the REPL. A file
 /// that fails to read or evaluate is reported and skipped; the REPL
-/// still starts so the session isn't lost. With no files, this is just
-/// the plain REPL.
+/// still starts so the session isn't lost. A file that calls `exit`
+/// ends the process without starting the REPL. With no files, this is
+/// just the plain REPL.
 fn run_files_then_repl(env: &EnvRef, paths: &[String]) -> ExitCode {
     for path in paths {
         let p = Path::new(path);
         match std::fs::read_to_string(p) {
-            Ok(source) => {
-                if let Err(e) = eval_source(&source, env.clone()) {
-                    eprintln!("error loading {}: {e}", p.display());
-                }
-            }
+            Ok(source) => match eval_source(&source, env.clone()) {
+                Ok(_) => {}
+                Err(EvalError::Exit(code)) => return exit_status(code),
+                Err(e) => eprintln!("error loading {}: {e}", p.display()),
+            },
             Err(e) => eprintln!("nscheme: cannot read {}: {e}", p.display()),
         }
     }
@@ -173,6 +161,7 @@ fn run_repl(env: &EnvRef) -> ExitCode {
         let _ = rl.load_history(p);
     }
 
+    let mut status = ExitCode::SUCCESS;
     loop {
         let mut buffer = String::new();
         // Read a complete datum: keep prompting until parens balance and
@@ -184,6 +173,12 @@ fn run_repl(env: &EnvRef) -> ExitCode {
             ReadOutcome::Input(source) => match eval_source(&source, env.clone()) {
                 Ok(Value::Unspecified) => {}
                 Ok(v) => print_value(&v),
+                // `(exit)` anywhere in the input ends the session (and
+                // still saves the history).
+                Err(EvalError::Exit(code)) => {
+                    status = exit_status(code);
+                    break;
+                }
                 Err(e) => report_error(&source, &e),
             },
         }
@@ -192,7 +187,7 @@ fn run_repl(env: &EnvRef) -> ExitCode {
     if let Some(p) = &history_path {
         let _ = rl.save_history(p);
     }
-    ExitCode::SUCCESS
+    status
 }
 
 /// Print a value using R7RS `write` semantics: strings get quoted,
@@ -225,10 +220,10 @@ fn read_complete_datum(
                 return ReadOutcome::Quit;
             }
         };
-        // Allow (exit) as a clean exit even though we don't have a real
-        // (exit) procedure yet.
+        // `,quit` is a REPL command, not Scheme. (`(exit)` is handled
+        // by evaluating it, so `(exit 3)` sets the status too.)
         let trimmed = line.trim();
-        if buffer.is_empty() && (trimmed == "(exit)" || trimmed == ",quit") {
+        if buffer.is_empty() && trimmed == ",quit" {
             return ReadOutcome::Quit;
         }
         if buffer.is_empty() && trimmed.is_empty() {

@@ -1,0 +1,17 @@
+[package]
+name = "nscheme-web"
+version = "0.1.0"
+edition = "2024"
+description = "Browser (WebAssembly) wrapper for the nscheme interpreter"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nscheme = { path = ".." }
+# Pinned exactly: the wasm-bindgen CLI that post-processes the .wasm must be
+# the same version (see web/build.sh).
+wasm-bindgen = "=0.2.130"
+console_error_panic_hook = "0.1"

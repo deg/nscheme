@@ -1,5 +1,7 @@
 # ADR 0007 — Filesystem-loaded libraries for R7RS-large
 
+> **Update (2026-11-16):** the search path now has one more step after `./lib`: a copy of every `lib/` source compiled into the binary by `build.rs`, so libraries load where there is no filesystem (the browser build) or from a binary whose `lib/` has moved. Disk still wins. `set_search_path(vec![])` now disables only disk lookup. See [0012 — Running in a web browser](0012-browser-target.md).
+
 **Status:** Accepted (2026-06-04) **Bead:** [nscheme-9q5](../.beads/issues.jsonl) **Related:** [0006 — Library / module system](0006-library-system.md), epics [nscheme-lul](../.beads/issues.jsonl) (Red) / [nscheme-oeg](../.beads/issues.jsonl) (Tangerine)
 
 ## Context

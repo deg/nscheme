@@ -113,6 +113,14 @@ pub enum RuntimeError {
 
     #[error("{0}")]
     Other(String),
+
+    /// `(exit code)` / `(emergency-exit code)`: end the whole program.
+    /// Not a condition. The evaluator turns it into
+    /// [`EvalError::Exit`](crate::eval::EvalError::Exit) *before* the
+    /// usual primitive-error-to-`raise` conversion, so `guard` and
+    /// `with-exception-handler` never see it (ADR 0012).
+    #[error("exit with status {0}")]
+    Exit(i32),
 }
 
 /// Convenience alias for runtime results.
@@ -238,6 +246,32 @@ impl fmt::Display for Symbol {
 pub struct Pair {
     pub car: Value,
     pub cdr: Value,
+}
+
+/// Free a list's spine in a loop rather than by recursion.
+///
+/// **Rust note**: the drop glue Rust generates would free a pair's `cdr`
+/// from inside the pair's own drop, one stack frame per element, so
+/// freeing a long list overflowed the stack: about 10,000 elements in
+/// a browser, about 1,000,000 natively (bead nscheme-9x7). Instead, each
+/// pair unlinks its tail and keeps walking while it is the only owner
+/// of the next pair. A pair someone else still holds stops the walk, and
+/// its own drop continues it later.
+///
+/// The `car` is still freed recursively, so deeply *nested* data can
+/// still overflow (nscheme-m6i).
+impl Drop for Pair {
+    fn drop(&mut self) {
+        let mut next = std::mem::replace(&mut self.cdr, Value::Null);
+        while let Value::Pair(rc) = next {
+            match Rc::try_unwrap(rc) {
+                // This pair is freed at the end of the iteration, with
+                // its tail already taken, so its own drop does not recurse.
+                Ok(cell) => next = std::mem::replace(&mut cell.into_inner().cdr, Value::Null),
+                Err(_shared) => break,
+            }
+        }
+    }
 }
 
 /// Components of a Cartesian complex number. Each field carries
@@ -1418,15 +1452,11 @@ fn looks_numeric(s: &str) -> bool {
     // lexeme and trails extra subsequent characters. R7RS doesn't
     // make this a numeric lexeme, but the writer pipe-quotes such
     // names to avoid the reader misinterpreting them.
-    if (lower.starts_with("+inf.0")
+    (lower.starts_with("+inf.0")
         || lower.starts_with("-inf.0")
         || lower.starts_with("+nan.0")
         || lower.starts_with("-nan.0"))
         && s.len() > 6
-    {
-        return true;
-    }
-    false
 }
 
 fn is_plain_identifier(s: &str) -> bool {
@@ -1768,14 +1798,14 @@ mod tests {
     fn symbols_intern_to_same_storage() {
         let a = Symbol::intern("foo");
         let b = Symbol::intern("foo");
-        assert!(a == b);
+        assert_eq!(a, b);
         // Pointer-identical:
         assert!(std::ptr::eq(a.name(), b.name()));
     }
 
     #[test]
     fn distinct_names_differ() {
-        assert!(Symbol::intern("foo") != Symbol::intern("bar"));
+        assert_ne!(Symbol::intern("foo"), Symbol::intern("bar"));
     }
 
     // -- list construction and length -------------------------------

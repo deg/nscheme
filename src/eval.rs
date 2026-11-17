@@ -77,7 +77,7 @@ use thiserror::Error;
 
 use crate::env::{Env, EnvRef};
 use crate::parse::{ParseError, parse_program};
-use crate::value::{ErrorKind, ErrorObject, Pair, Procedure, RuntimeError, Symbol, Value};
+use crate::value::{ErrorKind, ErrorObject, Procedure, RuntimeError, Symbol, Value};
 
 /// Convert a [`RuntimeError`] (raised by a primitive) into a Scheme
 /// error-object Value, so it can flow through the R7RS exception
@@ -115,6 +115,15 @@ pub enum EvalError {
     /// The payload is whatever value was passed to `raise`.
     #[error("unhandled raise: {0}")]
     Raised(Value),
+
+    /// The program called `exit` / `emergency-exit` with this status
+    /// code. It unwinds straight out of every nested evaluation,
+    /// bypassing exception handlers, and the host decides what exiting
+    /// means: the CLI ends the process, the browser wrapper ends the
+    /// run (ADR 0012). Like the former `process::exit`, it does not run
+    /// pending `dynamic-wind` after-thunks.
+    #[error("exit with status {0}")]
+    Exit(i32),
 }
 
 impl EvalError {
@@ -2714,6 +2723,9 @@ fn step_apply(
             }
             match body(&args) {
                 Ok(v) => Ok(Step::Return(v)),
+                // `exit` is not a condition: leave the eval loop
+                // directly, so no handler can catch it.
+                Err(RuntimeError::Exit(code)) => Err(EvalError::Exit(code)),
                 // R7RS §6.11: any "error" from a primitive should be
                 // catchable by with-exception-handler / guard. Convert
                 // the RuntimeError into an error-object value and
@@ -3024,9 +3036,10 @@ fn step_apply(
                     ));
                 }
             };
-            let dir = resolved
-                .parent()
-                .map_or_else(|| std::path::PathBuf::from("."), std::path::Path::to_path_buf);
+            let dir = resolved.parent().map_or_else(
+                || std::path::PathBuf::from("."),
+                std::path::Path::to_path_buf,
+            );
             crate::library::push_load_dir(dir);
             let result = eval_source(&source, env.clone());
             crate::library::pop_load_dir();
@@ -3397,12 +3410,9 @@ impl Iterator for ListIter {
                 None
             }
             Value::Pair(p) => {
-                let Pair { car, cdr } = {
+                let (car, cdr) = {
                     let cell = p.borrow();
-                    Pair {
-                        car: cell.car.clone(),
-                        cdr: cell.cdr.clone(),
-                    }
+                    (cell.car.clone(), cell.cdr.clone())
                 };
                 self.current = cdr;
                 Some(Ok(car))

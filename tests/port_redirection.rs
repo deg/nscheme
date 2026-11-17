@@ -17,10 +17,16 @@ fn run(src: &str) -> Result<Value, EvalError> {
 }
 fn eq(expr: &str, expected: &str) {
     let v = run(&format!("(equal? {expr} {expected})")).unwrap();
-    assert!(equal(&v, &Value::Bool(true)), "{expr} should equal {expected}");
+    assert!(
+        equal(&v, &Value::Bool(true)),
+        "{expr} should equal {expected}"
+    );
 }
 fn truthy(expr: &str) {
-    assert!(equal(&run(expr).unwrap(), &Value::Bool(true)), "{expr} should be #t");
+    assert!(
+        equal(&run(expr).unwrap(), &Value::Bool(true)),
+        "{expr} should be #t"
+    );
 }
 
 #[test]
@@ -73,8 +79,14 @@ fn nested_with_output_to_string() {
 
 #[test]
 fn with_input_from_string_feeds_the_readers() {
-    eq("(with-input-from-string \"(a b c) 99\" (lambda () (read)))", "'(a b c)");
-    eq("(with-input-from-string \"(a b c) 99\" (lambda () (read) (read)))", "99");
+    eq(
+        "(with-input-from-string \"(a b c) 99\" (lambda () (read)))",
+        "'(a b c)",
+    );
+    eq(
+        "(with-input-from-string \"(a b c) 99\" (lambda () (read) (read)))",
+        "99",
+    );
     eq(
         "(with-input-from-string \"l1\\nl2\" (lambda () (read-line)))",
         "\"l1\"",

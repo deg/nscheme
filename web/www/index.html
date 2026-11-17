@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nscheme in the browser</title>
+<meta name="description" content="An R7RS Scheme interpreter written in Rust, running in your browser via WebAssembly.">
+<style>
+  :root {
+    --bg: #fbfaf7;
+    --panel: #ffffff;
+    --ink: #1d1c1a;
+    --muted: #6b6760;
+    --line: #dedad2;
+    --accent: #7a3e9d;
+    --accent-ink: #ffffff;
+    --error: #b3261e;
+    --ok: #2e6b3a;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161517;
+      --panel: #1f1e21;
+      --ink: #ecebe8;
+      --muted: #9b978f;
+      --line: #35333a;
+      --accent: #c08ee0;
+      --accent-ink: #161517;
+      --error: #f2867c;
+      --ok: #8fd19e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.5 var(--sans);
+  }
+  main {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 32px 16px 48px;
+  }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h1 .lambda { color: var(--accent); }
+  .lede { color: var(--muted); margin: 0 0 24px; }
+  .lede a { color: var(--accent); }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  .toolbar label { color: var(--muted); font-size: 0.9rem; }
+  select, button {
+    font: inherit;
+    font-size: 0.95rem;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    padding: 6px 10px;
+  }
+  button.run {
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-color: var(--accent);
+    font-weight: 600;
+    padding: 6px 18px;
+    cursor: pointer;
+  }
+  button.run:disabled { opacity: 0.5; cursor: progress; }
+  .hint { color: var(--muted); font-size: 0.85rem; margin-left: auto; }
+  textarea, .output {
+    width: 100%;
+    font: 14px/1.5 var(--mono);
+    background: var(--panel);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  textarea {
+    min-height: 280px;
+    resize: vertical;
+    tab-size: 2;
+  }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  h2 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 20px 0 6px;
+  }
+  .output {
+    min-height: 120px;
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .output .value { color: var(--ok); }
+  .output .error { color: var(--error); }
+  .output .note { color: var(--muted); font-style: italic; }
+  footer { color: var(--muted); font-size: 0.85rem; margin-top: 24px; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <h1><span class="lambda">λ</span> nscheme</h1>
+  <p class="lede">An R7RS Scheme interpreter written in Rust, running in this page as WebAssembly.
+    The R7RS-small core plus the R7RS-large libraries — try
+    <code>(import (scheme list))</code>.
+    <a href="https://github.com/deg/nscheme">Source on GitHub</a>.</p>
+
+  <div class="toolbar">
+    <label for="examples">Example</label>
+    <select id="examples"></select>
+    <button class="run" id="run" disabled>Loading…</button>
+    <span class="hint" id="hint">Ctrl+Enter runs</span>
+  </div>
+  <textarea id="source" spellcheck="false" autocomplete="off" autocapitalize="off"
+            aria-label="Scheme program"></textarea>
+
+  <h2>Output</h2>
+  <pre class="output" id="output" aria-live="polite"></pre>
+
+  <footer>
+    Each run starts with no definitions of its own, though a library stays loaded once a
+    run has imported it. The program runs on the page itself, so an infinite loop freezes
+    the tab, and there is no keyboard input or file system yet.
+  </footer>
+</main>
+
+<script type="module">
+const EXAMPLES = {
+  "Hello": `(display "Hello from Scheme, running in your browser!")
+(newline)
+(+ 1 2 3)`,
+  "Exact numbers": `; Bignums and exact rationals are built in.
+(define (fact n) (if (= n 0) 1 (* n (fact (- n 1)))))
+(display (fact 30)) (newline)
+(display (/ 1 3)) (display " + ") (display (/ 1 6))
+(display " = ") (display (+ 1/3 1/6)) (newline)
+(exact->inexact 22/7)`,
+  "R7RS-large libraries": `(import (scheme list) (scheme sort) (scheme hash-table)
+        (scheme comparator))
+
+(define squares (map (lambda (n) (* n n)) (iota 10 1)))
+(display (list-sort > squares)) (newline)
+
+(define counts (make-hash-table (make-default-comparator)))
+(for-each (lambda (w) (hash-table-update!/default counts w (lambda (n) (+ n 1)) 0))
+          '(a b a c b a))
+(list-sort (lambda (x y) (> (cdr x) (cdr y))) (hash-table->alist counts))`,
+  "Continuations": `; A generator built from call/cc.
+(define (make-generator lst)
+  (define return #f)
+  (define (resume)
+    (for-each (lambda (x) (call/cc (lambda (k) (set! resume (lambda () (k #f)))
+                                               (return x))))
+              lst)
+    (return 'done))
+  (lambda () (call/cc (lambda (r) (set! return r) (resume)))))
+
+(define g (make-generator '(1 2 3)))
+(list (g) (g) (g) (g))`,
+  "Tail calls": `; A million iterations in constant space.
+(let loop ((i 0) (sum 0))
+  (if (= i 1000000)
+      sum
+      (loop (+ i 1) (+ sum i))))`,
+  "An error": `(define (average lst)
+  (/ (apply + lst) (length lst)))
+
+(display (average '(1 2 3 4)))
+(newline)
+(average '(1 2 x))`,
+};
+
+const select = document.getElementById("examples");
+const source = document.getElementById("source");
+const output = document.getElementById("output");
+const runButton = document.getElementById("run");
+const hint = document.getElementById("hint");
+
+for (const name of Object.keys(EXAMPLES)) {
+  select.add(new Option(name, name));
+}
+select.addEventListener("change", () => { source.value = EXAMPLES[select.value]; });
+source.value = EXAMPLES[select.value];
+if (/Mac|iPhone|iPad/.test(navigator.platform)) hint.textContent = "⌘+Enter runs";
+
+// The interpreter module. A Rust panic or a stack overflow traps the
+// wasm instance and leaves it unusable, so after one we import a fresh
+// copy (the query string makes the browser treat it as a new module).
+let nscheme = null;
+let generation = 0;
+async function loadInterpreter() {
+  const mod = await import(`./pkg/nscheme_web.js?instance=${generation++}`);
+  await mod.default();
+  nscheme = mod;
+}
+
+function line(text, cls) {
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = text;
+  output.append(span);
+}
+
+async function run() {
+  output.replaceChildren();
+  runButton.disabled = true;
+  // Let the browser paint the cleared output before a long run.
+  await new Promise(requestAnimationFrame);
+  const started = performance.now();
+  try {
+    const interp = new nscheme.Interpreter();
+    const r = interp.run(source.value);
+    interp.free();
+    if (r.output) line(r.output);
+    if (r.output && !r.output.endsWith("\n") && (r.value || r.error || r.exitCode !== undefined)) {
+      line("\n");
+    }
+    if (r.value !== undefined) line(`⇒ ${r.value}\n`, "value");
+    if (r.error !== undefined) line(`${r.error}\n`, "error");
+    if (r.exitCode !== undefined) line(`[exited with status ${r.exitCode}]\n`, "note");
+    r.free();
+  } catch (e) {
+    line(`The interpreter crashed: ${e.message || e}\n`, "error");
+    line("(Very deep nesting can exhaust the browser's stack.) Restarting it…\n", "note");
+    try {
+      await loadInterpreter();
+    } catch (e2) {
+      line(`Could not restart it: ${e2.message || e2}. Reload the page.\n`, "error");
+      runButton.textContent = "Unavailable";
+      return;
+    }
+  }
+  const ms = Math.round(performance.now() - started);
+  line(`\n[${ms} ms]`, "note");
+  runButton.disabled = false;
+}
+
+runButton.addEventListener("click", run);
+source.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    if (!runButton.disabled) run();
+  }
+});
+
+try {
+  await loadInterpreter();
+  runButton.textContent = "Run";
+  runButton.disabled = false;
+} catch (e) {
+  runButton.textContent = "Unavailable";
+  line(`Could not load the interpreter: ${e.message || e}`, "error");
+}
+</script>
+</body>
+</html>

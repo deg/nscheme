@@ -78,7 +78,7 @@ fn backtrace_is_short_for_tail_recursion() {
     );
     assert!(r.is_err());
     // Tail calls leave no CallArg frame, so the trace is empty (TCO).
-    assert!(take_backtrace().is_empty());
+    assert_eq!(take_backtrace(), Vec::<String>::new());
 }
 
 // --- Stage 3: runtime source location ---

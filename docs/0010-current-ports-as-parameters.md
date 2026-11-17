@@ -1,5 +1,7 @@
 # ADR 0010 — Current ports as parameters
 
+> **Update (2026-11-16):** the stdout and stderr ports no longer call `print!` / `eprint!` directly. They write through a replaceable per-thread console sink (`io::set_console_sink`), and `io::reset_current_ports()` re-points the three current-port parameters at the console ports for hosts that run several programs. The parameter design below is unchanged. See [0012 — Running in a web browser](0012-browser-target.md).
+
 **Status:** Accepted (2026-06-07) **Bead:** [nscheme-oge](../.beads/issues.jsonl) **Related:** [0005 — Exception handling](0005-exception-handling.md) (parameter objects / `parameterize`)
 
 ## Context
