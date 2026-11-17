@@ -116,3 +116,38 @@ pub fn locate(source: &str, span: Span) -> String {
     let carets = "^".repeat(width);
     format!("  at line {line}:{col}\n    {line_text}\n    {pad}{carets}")
 }
+
+/// The full report for an evaluation error from running `source`, as the
+/// CLI prints it and the browser wrapper shows it: the message, then a
+/// `line:col` + caret block, then the call trace when there is one.
+///
+/// Drains the backtrace recorded by the failed evaluation (via
+/// [`crate::eval::take_backtrace`]), so call it once per error, straight
+/// after the evaluation that failed.
+#[must_use]
+pub fn format_error(source: &str, e: &crate::eval::EvalError) -> String {
+    use crate::eval::EvalError;
+    // Always drain the call-chain backtrace so a stale one can't leak to
+    // a later (e.g. parse) error.
+    let trace = crate::eval::take_backtrace();
+    if let EvalError::Parse(pe) = e {
+        // Lex/parse errors carry a span into `source`.
+        if let Some(span) = pe.span() {
+            let loc = locate(source, span);
+            if !loc.is_empty() {
+                return format!("error: {pe}\n{loc}");
+            }
+        }
+        return format!("error: {e}");
+    }
+    let mut out = format!("error: {e}");
+    if let Some(loc) = current_location() {
+        out.push('\n');
+        out.push_str(&loc);
+    }
+    if !trace.is_empty() {
+        out.push_str("\n  call trace (innermost first): ");
+        out.push_str(&trace.join(" <- "));
+    }
+    out
+}

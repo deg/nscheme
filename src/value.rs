@@ -113,6 +113,14 @@ pub enum RuntimeError {
 
     #[error("{0}")]
     Other(String),
+
+    /// `(exit code)` / `(emergency-exit code)`: end the whole program.
+    /// Not a condition. The evaluator turns it into
+    /// [`EvalError::Exit`](crate::eval::EvalError::Exit) *before* the
+    /// usual primitive-error-to-`raise` conversion, so `guard` and
+    /// `with-exception-handler` never see it (ADR 0012).
+    #[error("exit with status {0}")]
+    Exit(i32),
 }
 
 /// Convenience alias for runtime results.

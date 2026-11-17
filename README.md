@@ -6,6 +6,7 @@ An [R7RS](https://standards.scheme.org/) Scheme interpreter written in Rust — 
 - **Curious how it was built?** [PROJECT.md](PROJECT.md) is the retrospective on the AI-assisted build process.
 - **What can it do?** [docs/showcase/](docs/showcase/) is a dozen tiny programs that show off the R7RS-large libraries.
 - **How conformant is it?** [docs/CONFORMANCE.md](docs/CONFORMANCE.md) — each library runs its actual upstream SRFI reference suite.
+- **Want to try it without installing anything?** The [browser demo](https://deg.github.io/nscheme/) runs it as WebAssembly. See "Running in a browser" below.
 - **Contributing or extending it?** [docs/STYLE.md](docs/STYLE.md) describes the in-code commentary conventions; [docs/](docs/) holds the architecture decision records.
 
 ## What this is
@@ -118,6 +119,20 @@ Evaluates the file (one or more files) into the session, then drops you into the
 # prints: 42
 ```
 
+`(exit n)` ends any of these with status `n`, including the REPL.
+
+### Running in a browser
+
+The same interpreter compiles to WebAssembly. A [demo page](https://deg.github.io/nscheme/) is built from `web/` and deployed to GitHub Pages on every push to `main`. To build it locally (needs the `wasm32-unknown-unknown` target and the exact `wasm-bindgen-cli` version `web/build.sh` names):
+
+```bash
+web/build.sh                       # builds web/www/pkg/
+node web/smoke.mjs                 # checks the built wasm
+python3 -m http.server -d web/www  # then open http://localhost:8000/
+```
+
+In the browser the program runs on the page's main thread (an infinite loop freezes the tab), console input reads as end-of-file, and there is no file system. See [ADR 0012](docs/0012-browser-target.md).
+
 ## A short tour of Scheme
 
 If you've never used a Lisp before: every expression is a parenthesized list where the first element is the *operator* and the rest are *operands*. `(+ 1 2)` means "call `+` with arguments `1` and `2`". There is no precedence and no infix notation — every operator is prefix.
@@ -189,13 +204,15 @@ Currently working:
 - String / char / symbol / vector / bytevector operations with Unicode-aware string indexing
 - Textual ports (string and file), `display` / `write` / `read-char` / datum `read`, `eof-object`, `call-with-port`, `call-with-output-file` / `call-with-input-file`; `parameterize`-able `current-output-port` / `current-input-port` with the redirection family (`with-output-to-file`, `with-input-from-file`, `with-output-to-string`, `with-input-from-string`)
 - Hygienic `syntax-rules` (scope-based) — `define-syntax`, `let-syntax`, `letrec-syntax`
-- `define-library`, `import` (with `only` / `except` / `prefix` / `rename`), `cond-expand`, and a **filesystem loader** that finds `(import (foo bar))` on disk as `foo/bar.sld` (search path: `NSCHEME_LIB_PATH` → compiled-in default → `./lib`)
+- `define-library`, `import` (with `only` / `except` / `prefix` / `rename`), `cond-expand`, and a **filesystem loader** that finds `(import (foo bar))` on disk as `foo/bar.sld` (search path: `NSCHEME_LIB_PATH` → compiled-in default → `./lib` → a copy of `lib/` compiled into the binary)
 - `call/cc`, `call-with-current-continuation`, `dynamic-wind`, `apply`
 - Exception handling: `raise`, `raise-continuable`, `with-exception-handler`, `guard`, error objects
 - `delay` / `force` / `make-promise`, lazy evaluation
 - `values` / `call-with-values` / `let-values` / `let*-values`
 - `make-parameter` / `parameterize`
 - Error diagnostics: parse and runtime errors report `line:col` with a source caret, plus a (tail-call-correct) call-chain backtrace
+- `exit` / `emergency-exit` with a status code (not catchable by `guard`)
+- Runs in a web browser as WebAssembly (`web/`; see "Running in a browser")
 
 ### R7RS-large libraries
 
@@ -210,6 +227,9 @@ Tracked in the `bd` issue tracker, with deeper detail in [`docs/`](docs/):
 - Error locations point at the nearest enclosing *recorded* form, so an error inside macro-expanded code reports the macro call site, not the original template (`nscheme-tn3` follow-up: span-preserving macro expansion)
 - Performance: it's a tree-walking interpreter with no bytecode VM, so heavy loops are slow (`nscheme-6mp`)
 - User-defined error categories beyond `read-error?` / `file-error?` (`nscheme-1o2`)
+- Very deeply nested data (thousands of levels) overflows the stack in the reader instead of raising an error: about 9,500 levels natively, about 4,800 in a browser (`nscheme-m6i`)
+- `exit` does not run pending `dynamic-wind` after-thunks
+- In the browser: no Web Worker or Stop button yet (`nscheme-yd0.2`), and no console input (`nscheme-yd0.3`)
 
 ## Design
 
@@ -226,6 +246,7 @@ See [`docs/`](docs/) for architecture decision records:
 - 0009 — First-class control procedures (`apply` / `eval` / `load`)
 - 0010 — Current ports as parameters
 - 0011 — Error diagnostics: source locations and backtraces
+- 0012 — Running in a web browser (WebAssembly)
 
 ADR 0001 is the load-bearing one: it explains why the evaluator is a step-loop with continuation frames rather than recursive `eval` calls, and why that choice makes TCO and `call/cc` cheap.
 
@@ -234,10 +255,10 @@ ADR 0001 is the load-bearing one: it explains why the evaluator is a step-loop w
 ### Running all tests
 
 ```bash
-cargo test
+cargo test --workspace
 ```
 
-That runs about **676 tests across ~46 files** in a few seconds (the slow SRFI 132 sort suite is `#[ignore]`d — run it with `-- --ignored`). The suite covers each module's unit tests, end-to-end integration tests (evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters), the in-house R7RS conformance corpus, and the R7RS-large reference-suite harness described below.
+That runs about **699 tests across ~49 files** in a few seconds (plain `cargo test` skips the browser wrapper's 7) (the slow SRFI 132 sort suite is `#[ignore]`d — run it with `-- --ignored`). The suite covers each module's unit tests, end-to-end integration tests (evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters), the in-house R7RS conformance corpus, and the R7RS-large reference-suite harness described below.
 
 ### R7RS-large reference suites
 
@@ -289,7 +310,7 @@ The `BASELINE_MIN_PASSES` constant in the test guards against regressions — lo
 ### Linting / formatting
 
 ```bash
-cargo clippy --all-targets -- -D warnings   # lint (treats warnings as errors)
+cargo clippy --all-targets --workspace -- -D warnings   # lint (treats warnings as errors)
 cargo fmt                                   # auto-format
 cargo fmt --check                           # verify formatted without changing
 ```

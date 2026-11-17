@@ -60,9 +60,11 @@ Once you've read the evaluator, the remaining files are small and self-contained
 
 [`src/io.rs`](src/io.rs) — port I/O. Same flat-catalog shape as `builtins.rs`.
 
-[`src/library.rs`](src/library.rs) — `define-library`, `import` (with `only`/`except`/`prefix`/`rename`), `cond-expand`, and the **filesystem loader**: an `(import (foo bar))` that isn't built in is resolved to `foo/bar.sld` on a search path. This is how the 21 R7RS-large libraries under [`lib/`](lib/) get loaded on demand.
+[`src/library.rs`](src/library.rs) — `define-library`, `import` (with `only`/`except`/`prefix`/`rename`), `cond-expand`, and the **filesystem loader**: an `(import (foo bar))` that isn't built in is resolved to `foo/bar.sld` on a search path. This is how the 21 R7RS-large libraries under [`lib/`](lib/) get loaded on demand. As a last resort it uses the copy of `lib/` that [`build.rs`](build.rs) compiles into the binary.
 
 [`src/main.rs`](src/main.rs) — the CLI frontend. The thin binary that consumes the library above. Wraps an interactive REPL with `rustyline` for line editing.
+
+[`web/src/lib.rs`](web/src/lib.rs) — the other frontend: a separate crate that compiles the library to WebAssembly for the browser demo page in [`web/www/`](web/www/). See [ADR 0012](docs/0012-browser-target.md).
 
 ## Suggested reading orders
 
@@ -150,6 +152,7 @@ The `docs/000N-*.md` files are the ADRs — durable records of the load-bearing 
 - [0009 — First-class control procedures: `apply` / `eval` / `load`](docs/0009-first-class-control-procedures.md)
 - [0010 — Current ports as parameters](docs/0010-current-ports-as-parameters.md)
 - [0011 — Error diagnostics: source locations and backtraces](docs/0011-error-diagnostics.md)
+- [0012 — Running in a web browser (WebAssembly)](docs/0012-browser-target.md)
 
 ## Test corpus
 

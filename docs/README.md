@@ -19,10 +19,11 @@ For a reading guide to the source code, see [`../TOUR.md`](../TOUR.md).
 - [0009 — First-class control procedures: `apply` / `eval` / `load`](0009-first-class-control-procedures.md)
 - [0010 — Current ports as parameters](0010-current-ports-as-parameters.md)
 - [0011 — Error diagnostics: source locations and backtraces](0011-error-diagnostics.md)
+- [0012 — Running in a web browser (WebAssembly)](0012-browser-target.md)
 
 Each ADR records the decision as of its date. Where a decision was later
 revised, a dated status-note at the top of the ADR points to what changed
-(see 0002, 0003, and 0006) — the body is left as the historical record.
+(see 0002, 0003, 0006, 0007, 0010 and 0011) — the body is left as the historical record.
 
 ## Conformance & examples
 

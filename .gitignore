@@ -13,3 +13,6 @@
 # Editor auto-save / lock files (Emacs, etc.)
 \#*\#
 .\#*
+
+# Browser build output (web/build.sh); GitHub Pages builds it in CI
+/web/www/pkg/

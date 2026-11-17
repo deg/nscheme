@@ -1756,15 +1756,17 @@ fn install_misc(env: &EnvRef) {
         ))
     });
     // (scheme time): current-second, current-jiffy, jiffies-per-second
+    // `web_time` is `std::time` natively; in a browser, where
+    // `std::time::SystemTime::now()` panics, it reads the JS clock.
     define(env, "current-second", Arity::Exact(0), |_| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map_err(|e| RuntimeError::Other(format!("current-second: {e}")))?;
         Ok(Value::Float(now.as_secs_f64()))
     });
     define(env, "current-jiffy", Arity::Exact(0), |_| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map_err(|e| RuntimeError::Other(format!("current-jiffy: {e}")))?;
         // Saturate on overflow rather than panic.
         Ok(Value::Int(
@@ -1779,26 +1781,18 @@ fn install_misc(env: &EnvRef) {
         let args: Vec<Value> = std::env::args().map(Value::string).collect();
         Ok(Value::list_from(args))
     });
+    // Neither ends the process itself: they return `RuntimeError::Exit`,
+    // which the evaluator turns into an uncatchable `EvalError::Exit` for
+    // the host to act on (ADR 0012). That is what lets the same library
+    // run in a browser, where `std::process::exit` traps.
     define(env, "exit", Arity::Range { min: 0, max: 1 }, |a| {
-        let code: i32 = match a.first() {
-            None | Some(Value::Bool(true)) => 0,
-            Some(Value::Int(n)) => i32::try_from(*n).unwrap_or(1),
-            _ => 1,
-        };
-        std::process::exit(code);
+        Err(RuntimeError::Exit(exit_code(a.first())))
     });
     define(
         env,
         "emergency-exit",
         Arity::Range { min: 0, max: 1 },
-        |a| {
-            let code: i32 = match a.first() {
-                None | Some(Value::Bool(true)) => 0,
-                Some(Value::Int(n)) => i32::try_from(*n).unwrap_or(1),
-                _ => 1,
-            };
-            std::process::exit(code);
-        },
+        |a| Err(RuntimeError::Exit(exit_code(a.first()))),
     );
     define(
         env,
@@ -1947,8 +1941,11 @@ fn install_misc(env: &EnvRef) {
                     unreachable!()
                 }
             };
-            let v = crate::eval::eval(expr, env)
-                .map_err(|e| RuntimeError::Other(format!("force: {e}")))?;
+            // `exit` must stay an exit, not become a catchable error.
+            let v = crate::eval::eval(expr, env).map_err(|e| match e {
+                EvalError::Exit(code) => RuntimeError::Exit(code),
+                e => RuntimeError::Other(format!("force: {e}")),
+            })?;
             *p.borrow_mut() = crate::value::PromiseState::Forced(v.clone());
             cur = v;
         }
@@ -2686,6 +2683,16 @@ fn string_chain(args: &[Value], pass: fn(&str, &str) -> bool) -> Result<Value, R
         prev = cur;
     }
     Ok(Value::Bool(true))
+}
+
+/// R7RS §6.14 `exit` status: absent or `#t` is success (0), an exact
+/// integer is passed through, anything else (`#f` included) is failure.
+fn exit_code(arg: Option<&Value>) -> i32 {
+    match arg {
+        None | Some(Value::Bool(true)) => 0,
+        Some(Value::Int(n)) => i32::try_from(*n).unwrap_or(1),
+        _ => 1,
+    }
 }
 
 pub(crate) fn value_to_usize(v: &Value, ctx: &'static str) -> Result<usize, RuntimeError> {

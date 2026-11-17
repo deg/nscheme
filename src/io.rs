@@ -53,6 +53,15 @@
 //!                            `with-input-from-file`,
 //!                            `with-output-to-file`
 //!
+//! ## The console sink
+//!
+//! The stdout and stderr ports don't call `print!` directly: they write
+//! through a per-thread *console sink*, a callback an embedder can
+//! replace with [`set_console_sink`]. The default prints to the
+//! process's stdout/stderr. The browser wrapper (`web/`) installs one
+//! that collects the text instead, since a browser has no stdout
+//! (ADR 0012).
+//!
 //! ## Read alongside
 //!
 //! - [`crate::value::Port`] — the underlying enum and its variants.
@@ -88,6 +97,66 @@ struct CurrentPorts {
 
 thread_local! {
     static CURRENT_PORTS: RefCell<Option<CurrentPorts>> = const { RefCell::new(None) };
+}
+
+/// Which console stream a write is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsoleStream {
+    /// The stdout port (`current-output-port`'s initial value).
+    Out,
+    /// The stderr port (`current-error-port`'s initial value).
+    Err,
+}
+
+/// A replacement destination for console output; see [`set_console_sink`].
+pub type ConsoleSink = Box<dyn FnMut(ConsoleStream, &str)>;
+
+thread_local! {
+    /// The installed console sink, or `None` for the default (print to
+    /// the process's stdout/stderr).
+    static CONSOLE_SINK: RefCell<Option<ConsoleSink>> = const { RefCell::new(None) };
+}
+
+/// Send everything written to the stdout and stderr ports on this thread
+/// to `sink` instead of the process's stdout/stderr; `None` restores the
+/// default. Writes to string and file ports are unaffected.
+///
+/// The sink runs while the interpreter is mid-write, so it must not
+/// evaluate Scheme code or write to a console port itself.
+pub fn set_console_sink(sink: Option<ConsoleSink>) {
+    CONSOLE_SINK.with(|s| *s.borrow_mut() = sink);
+}
+
+/// Point `current-input-port`, `current-output-port` and
+/// `current-error-port` back at the console ports, reopening any the
+/// last program closed (`close-port` turns the shared port object into
+/// `Port::Closed` in place) and discarding buffered stdin. An uncaught `raise` restores `parameterize`
+/// bindings as it unwinds, but `exit` (and an error that bypasses the
+/// raise machinery) leaves them in place, so an embedder that runs
+/// several programs on one thread calls this before each run.
+pub fn reset_current_ports() {
+    with_current_ports(|p| {
+        *p.input.value.borrow_mut() = p.stdin.clone();
+        *p.output.value.borrow_mut() = p.stdout.clone();
+        *p.error.value.borrow_mut() = p.stderr.clone();
+        // A fresh console port of each kind; this also empties stdin's
+        // buffer.
+        for (port, fresh) in [
+            (
+                &p.stdin,
+                Port::StdIn {
+                    buffer: String::new(),
+                    pos: 0,
+                },
+            ),
+            (&p.stdout, Port::StdOut),
+            (&p.stderr, Port::StdErr),
+        ] {
+            if let Value::Port(port) = port {
+                *port.borrow_mut() = fresh;
+            }
+        }
+    });
 }
 
 /// Initialize the current-port singletons on first use and run `f` over
@@ -697,15 +766,8 @@ fn write_to_port(port: Option<&Value>, s: &str) -> Result<Value, RuntimeError> {
         Some(Value::Port(p)) => {
             let mut port = p.borrow_mut();
             match &mut *port {
-                Port::StdOut => {
-                    print!("{s}");
-                    std::io::stdout()
-                        .flush()
-                        .map_err(|e| RuntimeError::Other(format!("flush: {e}")))?;
-                }
-                Port::StdErr => {
-                    eprint!("{s}");
-                }
+                Port::StdOut => console_write(ConsoleStream::Out, s)?,
+                Port::StdErr => console_write(ConsoleStream::Err, s)?,
                 Port::StringOutput { buffer }
                 | Port::BinaryOutput { buffer }
                 | Port::FileOutput { buffer, .. } => {
@@ -721,6 +783,33 @@ fn write_to_port(port: Option<&Value>, s: &str) -> Result<Value, RuntimeError> {
             Ok(Value::Unspecified)
         }
         Some(other) => Err(type_err("port", other)),
+    }
+}
+
+/// Write `s` to the console: through the installed sink, or else to
+/// the process's stdout (flushed, so prompts appear) or stderr.
+fn console_write(stream: ConsoleStream, s: &str) -> Result<(), RuntimeError> {
+    let handled = CONSOLE_SINK.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(sink) => {
+            sink(stream, s);
+            true
+        }
+        None => false,
+    });
+    if handled {
+        return Ok(());
+    }
+    match stream {
+        ConsoleStream::Out => {
+            print!("{s}");
+            std::io::stdout()
+                .flush()
+                .map_err(|e| RuntimeError::Other(format!("flush: {e}")))
+        }
+        ConsoleStream::Err => {
+            eprint!("{s}");
+            Ok(())
+        }
     }
 }
 

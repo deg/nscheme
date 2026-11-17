@@ -28,6 +28,9 @@
 //! - [`library`] — `define-library`, `import`, `cond-expand`. The
 //!   R7RS module system.
 //!
+//! The same library also runs in a web browser: the `web/` crate
+//! compiles it to WebAssembly (ADR 0012).
+//!
 //! See `TOUR.md` at the repo root for a guided reading order; see
 //! `docs/STYLE.md` for the in-code commentary conventions; see
 //! `docs/0001-…06-…md` for the architecture decision records.

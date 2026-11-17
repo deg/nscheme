@@ -64,15 +64,19 @@ single binary, no bytecode VM. See `README.md` for the user-facing overview,
 cargo build                         # debug binary at target/debug/nscheme
 cargo build --release               # optimized binary at target/release/nscheme
 
-cargo test                          # full suite (~676 tests; SRFI 132 sort is #[ignore]d)
+cargo test --workspace              # full suite (~699 tests; SRFI 132 sort is #[ignore]d)
 cargo test --test conformance       # R7RS-large upstream SRFI reference suites
 cargo test --test conformance -- --ignored   # also the ~2-min sort suite
 cargo test --test r7rs_chibi -- --nocapture  # chibi R7RS-small corpus (1180 forms / 1225 assertions)
 cargo test <name>                   # any test whose name matches
 
-cargo clippy --all-targets -- -D warnings    # lint (warnings are errors)
+cargo clippy --all-targets --workspace -- -D warnings    # lint (warnings are errors)
 cargo fmt                           # format;  cargo fmt --check to verify
 ```
+
+Browser build (ADR 0012): `web/build.sh` then `node web/smoke.mjs`; serve
+with `python3 -m http.server -d web/www`. Needs the `wasm32-unknown-unknown`
+target and the exact `wasm-bindgen-cli` version pinned in `web/Cargo.toml`.
 
 Run a program: `./target/debug/nscheme FILE`. Stay in the REPL after loading:
 `./target/debug/nscheme -i FILE`. The interpreter finds `lib/` automatically;
@@ -93,8 +97,14 @@ override with `NSCHEME_LIB_PATH=lib` if you've moved things.
   primitives; `io.rs` is ports. `macros.rs` is scope-based `syntax-rules`.
 - `library.rs` is `define-library`/`import`/`cond-expand` **plus a filesystem
   loader**: `(import (foo bar))` resolves to `foo/bar.sld` on the search path
-  (`NSCHEME_LIB_PATH` → compiled-in `<crate>/lib` → `./lib`). The 21
-  R7RS-large libraries live in `lib/` as `.sld` source.
+  (`NSCHEME_LIB_PATH` → compiled-in `<crate>/lib` → `./lib` → the copy of
+  `lib/` that `build.rs` embeds in the binary). The 21 R7RS-large libraries
+  live in `lib/` as `.sld` source.
+- `web/` is a second workspace crate: the wasm-bindgen wrapper for the
+  browser (it needs `unsafe`, which the main crate forbids). Browser-specific
+  behavior lives in the main library on every target (console sink, `exit` as
+  `EvalError::Exit`, embedded `lib/`, `web-time` clock) so native tests
+  cover it. See ADR 0012.
 
 ## Conventions & Patterns
 

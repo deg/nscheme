@@ -1,5 +1,7 @@
 # ADR 0011 — Error diagnostics: source locations and backtraces
 
+> **Update (2026-11-16):** the error report this ADR describes as printed by `main.rs::report_error` is now built by `diagnostic::format_error(source, &err) -> String`. The CLI prints it and the browser wrapper returns it. `EvalError` gained one variant, `Exit(code)`, for `exit` (see [0012 — Running in a web browser](0012-browser-target.md)).
+
 **Status:** Accepted (2026-06-07) **Bead:** [nscheme-tn3](../.beads/issues.jsonl) **Related:** [0001 — Tree-walking interpreter](0001-tree-walking-interpreter.md)
 
 ## Context
