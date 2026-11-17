@@ -67,10 +67,7 @@ fn build_base_env() -> Result<EnvRef, EvalError> {
 }
 
 fn print_usage() {
-    eprintln!(
-        "nscheme {} — R7RS Scheme interpreter",
-        nscheme::VERSION
-    );
+    eprintln!("nscheme {} — R7RS Scheme interpreter", nscheme::VERSION);
     eprintln!();
     eprintln!("Usage:");
     eprintln!("    nscheme              start the interactive REPL");

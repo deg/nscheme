@@ -67,7 +67,9 @@ use std::rc::Rc;
 
 use crate::builtins::value_to_usize;
 use crate::env::EnvRef;
-use crate::value::{Arity, ParameterCell, Port, PrimitiveFn, Procedure, RuntimeError, Symbol, Value};
+use crate::value::{
+    Arity, ParameterCell, Port, PrimitiveFn, Procedure, RuntimeError, Symbol, Value,
+};
 
 /// The three current-port parameter cells, plus the canonical stdio port
 /// objects, shared across every `install_base` on this thread. They must
@@ -806,7 +808,7 @@ fn read_line_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
                 return Ok(Value::Eof);
             }
             let remaining = &content[*pos..];
-            let line_end = remaining.find('\n').map_or(remaining.len(), |i| i);
+            let line_end = remaining.find('\n').unwrap_or(remaining.len());
             let line: String = remaining[..line_end].to_string();
             *pos += line_end;
             // Skip the newline.
@@ -834,7 +836,6 @@ fn read_line_from_port(port: &mut Port) -> Result<Value, RuntimeError> {
         _ => Err(RuntimeError::Other("read-line: not an input port".into())),
     }
 }
-
 
 /// Scheme-level port helpers. The `current-*-port` accessors are now
 /// real parameters (installed in `install_io`), so redirection works:

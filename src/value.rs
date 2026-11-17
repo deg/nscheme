@@ -1418,15 +1418,11 @@ fn looks_numeric(s: &str) -> bool {
     // lexeme and trails extra subsequent characters. R7RS doesn't
     // make this a numeric lexeme, but the writer pipe-quotes such
     // names to avoid the reader misinterpreting them.
-    if (lower.starts_with("+inf.0")
+    (lower.starts_with("+inf.0")
         || lower.starts_with("-inf.0")
         || lower.starts_with("+nan.0")
         || lower.starts_with("-nan.0"))
         && s.len() > 6
-    {
-        return true;
-    }
-    false
 }
 
 fn is_plain_identifier(s: &str) -> bool {
@@ -1768,14 +1764,14 @@ mod tests {
     fn symbols_intern_to_same_storage() {
         let a = Symbol::intern("foo");
         let b = Symbol::intern("foo");
-        assert!(a == b);
+        assert_eq!(a, b);
         // Pointer-identical:
         assert!(std::ptr::eq(a.name(), b.name()));
     }
 
     #[test]
     fn distinct_names_differ() {
-        assert!(Symbol::intern("foo") != Symbol::intern("bar"));
+        assert_ne!(Symbol::intern("foo"), Symbol::intern("bar"));
     }
 
     // -- list construction and length -------------------------------

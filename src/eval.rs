@@ -3024,9 +3024,10 @@ fn step_apply(
                     ));
                 }
             };
-            let dir = resolved
-                .parent()
-                .map_or_else(|| std::path::PathBuf::from("."), std::path::Path::to_path_buf);
+            let dir = resolved.parent().map_or_else(
+                || std::path::PathBuf::from("."),
+                std::path::Path::to_path_buf,
+            );
             crate::library::push_load_dir(dir);
             let result = eval_source(&source, env.clone());
             crate::library::pop_load_dir();

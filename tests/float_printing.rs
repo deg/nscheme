@@ -59,8 +59,14 @@ fn round_trips_for_a_wide_sample() {
     let mut check = |x: f64| {
         if x.is_finite() {
             let s = show(x);
-            let back: f64 = s.parse().unwrap_or_else(|_| panic!("unparseable: {s:?} for {x}"));
-            assert_eq!(back.to_bits(), x.to_bits(), "round-trip failed: {x} -> {s:?}");
+            let back: f64 = s
+                .parse()
+                .unwrap_or_else(|_| panic!("unparseable: {s:?} for {x}"));
+            assert_eq!(
+                back.to_bits(),
+                x.to_bits(),
+                "round-trip failed: {x} -> {s:?}"
+            );
             checked += 1;
         }
     };
@@ -70,7 +76,7 @@ fn round_trips_for_a_wide_sample() {
         f64::MAX,
         f64::MIN,
         f64::MIN_POSITIVE,
-        f64::from_bits(1),      // smallest subnormal
+        f64::from_bits(1),                     // smallest subnormal
         f64::from_bits(0x000f_ffff_ffff_ffff), // largest subnormal
         5e-324,                                // == smallest subnormal, via literal
     ] {

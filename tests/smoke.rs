@@ -3,5 +3,5 @@
 
 #[test]
 fn crate_exposes_version() {
-    assert!(!nscheme::VERSION.is_empty());
+    assert_ne!(nscheme::VERSION, "");
 }

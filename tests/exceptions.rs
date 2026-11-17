@@ -147,9 +147,7 @@ fn user_records_serve_as_typed_conditions() {
             (classify (lambda () (error \"plain\" 1)))
             (app-error? (make-config-error 'k)))";
     let v = run(src).unwrap();
-    let expected = run(
-        "(list (list 'app 404) (list 'config 'db) (list 'builtin \"plain\") #f)",
-    )
-    .unwrap();
+    let expected =
+        run("(list (list 'app 404) (list 'config 'db) (list 'builtin \"plain\") #f)").unwrap();
     assert!(equal(&v, &expected), "got {v:?}");
 }

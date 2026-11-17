@@ -260,9 +260,10 @@ impl Num {
     fn to_complex(&self) -> (f64, f64) {
         match self {
             Self::Complex(re, im) => (*re, *im),
-            Self::ExactComplex(re, im) => {
-                (re.to_f64().unwrap_or(f64::NAN), im.to_f64().unwrap_or(f64::NAN))
-            }
+            Self::ExactComplex(re, im) => (
+                re.to_f64().unwrap_or(f64::NAN),
+                im.to_f64().unwrap_or(f64::NAN),
+            ),
             _ => (self.to_f64(), 0.0),
         }
     }
@@ -587,8 +588,7 @@ fn rational_to_value(r: BigRational) -> Value {
 
 fn num_add(a: Num, b: Num) -> Num {
     if a.is_complex() || b.is_complex() {
-        if let (Some((ar, ai)), Some((br, bi))) =
-            (a.exact_complex_parts(), b.exact_complex_parts())
+        if let (Some((ar, ai)), Some((br, bi))) = (a.exact_complex_parts(), b.exact_complex_parts())
         {
             return Num::ExactComplex(ar + br, ai + bi);
         }
@@ -610,8 +610,7 @@ fn num_add(a: Num, b: Num) -> Num {
 
 fn num_sub(a: Num, b: Num) -> Num {
     if a.is_complex() || b.is_complex() {
-        if let (Some((ar, ai)), Some((br, bi))) =
-            (a.exact_complex_parts(), b.exact_complex_parts())
+        if let (Some((ar, ai)), Some((br, bi))) = (a.exact_complex_parts(), b.exact_complex_parts())
         {
             return Num::ExactComplex(ar - br, ai - bi);
         }
@@ -633,8 +632,7 @@ fn num_sub(a: Num, b: Num) -> Num {
 
 fn num_mul(a: Num, b: Num) -> Num {
     if a.is_complex() || b.is_complex() {
-        if let (Some((ar, ai)), Some((br, bi))) =
-            (a.exact_complex_parts(), b.exact_complex_parts())
+        if let (Some((ar, ai)), Some((br, bi))) = (a.exact_complex_parts(), b.exact_complex_parts())
         {
             // (ar + ai·i)(br + bi·i) = (ar·br − ai·bi) + (ar·bi + ai·br)i
             return Num::ExactComplex(&ar * &br - &ai * &bi, &ar * &bi + &ai * &br);
@@ -657,8 +655,7 @@ fn num_mul(a: Num, b: Num) -> Num {
 
 fn num_div(a: Num, b: Num) -> Result<Num, RuntimeError> {
     if a.is_complex() || b.is_complex() {
-        if let (Some((ar, ai)), Some((br, bi))) =
-            (a.exact_complex_parts(), b.exact_complex_parts())
+        if let (Some((ar, ai)), Some((br, bi))) = (a.exact_complex_parts(), b.exact_complex_parts())
         {
             // (ar + ai·i)/(br + bi·i): multiply by the conjugate of the
             // denominator; denom = br² + bi².
@@ -1471,8 +1468,12 @@ fn assoc_with(
 // ---------------------------------------------------------------------
 
 fn install_misc(env: &EnvRef) {
-    define(env, "exact->inexact", Arity::Exact(1), |a| to_inexact_value(&a[0]));
-    define(env, "inexact->exact", Arity::Exact(1), |a| to_exact_value(&a[0]));
+    define(env, "exact->inexact", Arity::Exact(1), |a| {
+        to_inexact_value(&a[0])
+    });
+    define(env, "inexact->exact", Arity::Exact(1), |a| {
+        to_exact_value(&a[0])
+    });
     // R7RS `exact` / `inexact` are the modern aliases.
     define(env, "exact", Arity::Exact(1), |a| to_exact_value(&a[0]));
     define(env, "inexact", Arity::Exact(1), |a| to_inexact_value(&a[0]));
