@@ -6,10 +6,9 @@
 //! `delete-file`, `load`, `include`, and the library loader's lookup of
 //! `.sld` files. By default that is [`StdFileSystem`], the real disk. An
 //! embedder can install another with [`set_file_system`]. The browser
-//! playground is to install a [`MemoryFileSystem`] seeded from the files
-//! the page has saved, and post each change back to the page to persist
-//! (nscheme-yd0.2.4); until it does, file access in a browser fails as
-//! it always has (bead nscheme-yd0.2.1, ADR 0012).
+//! playground installs a [`MemoryFileSystem`] seeded from the files the
+//! page has saved in IndexedDB, and posts each change back to the page to
+//! persist (beads nscheme-yd0.2.1 and nscheme-yd0.2.4, ADRs 0012 and 0014).
 //!
 //! The command-line frontend reading the program you named (`nscheme
 //! FILE`) is the host reading its input, not the program touching

@@ -49,6 +49,8 @@
 //! [`forget_user_libraries`] drops all the others (saved files, inline
 //! `define-library` forms), so the browser playground's Reset makes an
 //! edited library reload while the standard ones stay cached (ADR 0013).
+//! [`forget_library`] drops a single one: the playground calls it when
+//! the user saves that library's file from its Files panel (ADR 0014).
 //!
 //! ## Mutable bindings are shared, not copied
 //!

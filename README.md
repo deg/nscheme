@@ -232,6 +232,8 @@ Tracked in the `bd` issue tracker, with deeper detail in [`docs/`](docs/):
 - `exit` does not run pending `dynamic-wind` after-thunks (`nscheme-zni`)
 - `make-parameter` ignores its converter procedure (`nscheme-x17`)
 - `force` turns a `raise` inside a promise into an error string, so handlers can't see the raised object (`nscheme-rsh`)
+- An output file whose port is never closed is never written, including when its procedure raises inside `call-with-output-file` (`nscheme-eg1`)
+- A library name containing a dot, like `(mine greet.v2)`, is looked up as the wrong file (`nscheme-umv`)
 - In the browser: no console input (`nscheme-yd0.3`)
 
 ## Design
