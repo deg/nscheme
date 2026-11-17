@@ -79,6 +79,26 @@ check("deep tail recursion", "(let loop ((i 0)) (if (< i 1000000) (loop (+ i 1))
 check("deep non-tail recursion", "(define (count n) (if (= n 0) 0 (+ 1 (count (- n 1))))) (count 100000)", (r) =>
   r.value === "100000" ? null : "deep recursion failed");
 
+// Streaming (nscheme-yd0.2.2): runStreaming hands each console write to a
+// callback as it happens, instead of returning the output at the end.
+// (worker.js batches them; it needs every write, in order, to do so.)
+{
+  const chunks = [];
+  const interp = new Interpreter();
+  const r = interp.runStreaming(
+    '(display "a") (newline) (let loop ((i 0)) (when (< i 20000) (display "x") (loop (+ i 1)))) 42',
+    (text) => chunks.push(text));
+  const all = chunks.join("");
+  const problem =
+    all !== "a\n" + "x".repeat(20000) ? "streamed text differs" :
+    r.output !== "" ? "runStreaming also returned the output" :
+    r.value !== "42" ? "value lost" :
+    // display "a", newline, then 20,000 one-character writes
+    chunks.length !== 20002 ? `${chunks.length} callbacks for 20,002 writes` : null;
+  if (problem) { console.log(`FAIL streaming: ${problem}`); failures++; }
+  else console.log("ok   streaming");
+}
+
 // Freeing a list used to recurse once per element, trapping at about
 // 10,000 elements (nscheme-9x7).
 check("long flat list is freed", "(length (make-list 1000000 0))", (r) =>

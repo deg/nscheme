@@ -122,6 +122,7 @@
     <label for="examples">Example</label>
     <select id="examples"></select>
     <button class="run" id="run" disabled>Loading…</button>
+    <button id="stop" disabled>Stop</button>
     <span class="hint" id="hint">Ctrl+Enter runs</span>
   </div>
   <textarea id="source" spellcheck="false" autocomplete="off" autocapitalize="off"
@@ -132,8 +133,8 @@
 
   <footer>
     Each run starts with no definitions of its own, though a library stays loaded once a
-    run has imported it. The program runs on the page itself, so an infinite loop freezes
-    the tab, and there is no keyboard input or file system yet.
+    run has imported it. Programs run in the background, so Stop ends one that runs too
+    long. There is no keyboard input or file system yet.
   </footer>
 </main>
 
@@ -175,6 +176,13 @@ const EXAMPLES = {
   (if (= i 1000000)
       sum
       (loop (+ i 1) (+ sum i))))`,
+  "Runs forever (try Stop)": `; Counts forever, printing every 200,000 steps.
+; Output streams in as it is printed; press Stop to end it.
+(let loop ((i 0))
+  (when (= 0 (remainder i 200000))
+    (display i)
+    (newline))
+  (loop (+ i 1)))`,
   "An error": `(define (average lst)
   (/ (apply + lst) (length lst)))
 
@@ -196,15 +204,83 @@ select.addEventListener("change", () => { source.value = EXAMPLES[select.value];
 source.value = EXAMPLES[select.value];
 if (/Mac|iPhone|iPad/.test(navigator.platform)) hint.textContent = "⌘+Enter runs";
 
-// The interpreter module. A Rust panic or a stack overflow traps the
-// wasm instance and leaves it unusable, so after one we import a fresh
-// copy (the query string makes the browser treat it as a new module).
-let nscheme = null;
-let generation = 0;
-async function loadInterpreter() {
-  const mod = await import(`./pkg/nscheme_web.js?instance=${generation++}`);
-  await mod.default();
-  nscheme = mod;
+// The interpreter runs in a Web Worker (worker.js), so a long or endless
+// program never freezes the page. Stop terminates the worker and starts
+// a new one; so does a crash (a Rust panic or a stack overflow leaves the
+// worker's wasm instance unusable). Output streams in as the program
+// writes it.
+const stopButton = document.getElementById("stop");
+let worker = null;
+let ready = false;
+// The run in progress: {id, started, kept, hidden, note, endsInNewline}.
+let current = null;
+let nextId = 1;
+
+// A runaway printing loop can produce megabytes a second. The page keeps
+// at most this much of a run's output and counts the rest, so it stays
+// responsive (and Stop keeps working) however long the loop runs.
+const MAX_KEPT_CHARS = 1_000_000;
+
+function startWorker() {
+  ready = false;
+  runButton.disabled = true;
+  worker = new Worker("./worker.js", { type: "module" });
+  worker.onmessage = (event) => onWorkerMessage(event.data);
+  worker.onerror = (event) => {
+    event.preventDefault();
+    unavailable(`Could not start the interpreter: ${event.message || "the worker failed"}`);
+  };
+}
+
+function unavailable(message) {
+  runButton.textContent = "Unavailable";
+  runButton.disabled = true;
+  stopButton.disabled = true;
+  line(`${message}. Reload the page to try again.\n`, "error");
+}
+
+function onWorkerMessage(msg) {
+  switch (msg.type) {
+    case "ready":
+      ready = true;
+      runButton.textContent = "Run";
+      runButton.disabled = current !== null;
+      break;
+    case "failed":
+      unavailable(`Could not load the interpreter: ${msg.message}`);
+      break;
+    case "output":
+      if (current && msg.id === current.id) showOutput(msg.text);
+      break;
+    case "done":
+      if (current && msg.id === current.id) finishRun(msg);
+      break;
+    case "crashed":
+      if (current && msg.id === current.id) {
+        line(`${current.endsInNewline ? "" : "\n"}The interpreter crashed: ${msg.message}\n`, "error");
+        line("(Very deep nesting can exhaust the browser's stack.) Restarting it…\n", "note");
+        restart();
+      }
+      break;
+  }
+}
+
+// Add a batch of program output. Each batch is its own text node: growing
+// one node would copy all the text so far on every batch.
+function showOutput(text) {
+  const room = MAX_KEPT_CHARS - current.kept;
+  if (room > 0) {
+    const shown = text.length <= room ? text : text.slice(0, room);
+    current.outputArea.before(document.createTextNode(shown));
+    current.kept += shown.length;
+    current.endsInNewline = shown.endsWith("\n");
+  }
+  const dropped = Math.max(0, text.length - Math.max(0, room));
+  if (dropped > 0) {
+    current.hidden += dropped;
+    current.note.textContent = `\n[… ${current.hidden.toLocaleString()} more characters not shown]\n`;
+    current.endsInNewline = true;
+  }
 }
 
 function line(text, cls) {
@@ -214,56 +290,61 @@ function line(text, cls) {
   output.append(span);
 }
 
-async function run() {
+function run() {
+  if (!ready || current) return;
   output.replaceChildren();
+  // Output goes before `outputArea`, an empty marker; the truncation note
+  // sits right after the kept output.
+  const outputArea = document.createTextNode("");
+  const note = document.createElement("span");
+  note.className = "note";
+  output.append(outputArea, note);
+  current = { id: nextId++, started: performance.now(), outputArea, note, kept: 0, hidden: 0, endsInNewline: true };
   runButton.disabled = true;
-  // Let the browser paint the cleared output before a long run.
-  await new Promise(requestAnimationFrame);
-  const started = performance.now();
-  try {
-    const interp = new nscheme.Interpreter();
-    const r = interp.run(source.value);
-    interp.free();
-    if (r.output) line(r.output);
-    if (r.output && !r.output.endsWith("\n") && (r.value || r.error || r.exitCode !== undefined)) {
-      line("\n");
-    }
-    if (r.value !== undefined) line(`⇒ ${r.value}\n`, "value");
-    if (r.error !== undefined) line(`${r.error}\n`, "error");
-    if (r.exitCode !== undefined) line(`[exited with status ${r.exitCode}]\n`, "note");
-    r.free();
-  } catch (e) {
-    line(`The interpreter crashed: ${e.message || e}\n`, "error");
-    line("(Very deep nesting can exhaust the browser's stack.) Restarting it…\n", "note");
-    try {
-      await loadInterpreter();
-    } catch (e2) {
-      line(`Could not restart it: ${e2.message || e2}. Reload the page.\n`, "error");
-      runButton.textContent = "Unavailable";
-      return;
-    }
-  }
-  const ms = Math.round(performance.now() - started);
+  stopButton.disabled = false;
+  worker.postMessage({ type: "run", id: current.id, source: source.value });
+}
+
+function finishRun(r) {
+  const anything = r.value !== undefined || r.error !== undefined || r.exitCode !== undefined;
+  if (anything && !current.endsInNewline) line("\n");
+  if (r.value !== undefined) line(`⇒ ${r.value}\n`, "value");
+  if (r.error !== undefined) line(`${r.error}\n`, "error");
+  if (r.exitCode !== undefined) line(`[exited with status ${r.exitCode}]\n`, "note");
+  endRun();
+}
+
+function endRun() {
+  const ms = Math.round(performance.now() - current.started);
   line(`\n[${ms} ms]`, "note");
-  runButton.disabled = false;
+  current = null;
+  stopButton.disabled = true;
+  runButton.disabled = !ready;
+}
+
+// End the run in progress by discarding its worker, and start a new one.
+function restart() {
+  worker.terminate();
+  endRun();
+  startWorker();
+}
+
+function stop() {
+  if (!current) return;
+  line(`${current.endsInNewline ? "" : "\n"}[stopped]\n`, "note");
+  restart();
 }
 
 runButton.addEventListener("click", run);
+stopButton.addEventListener("click", stop);
 source.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
-    if (!runButton.disabled) run();
+    run();
   }
 });
 
-try {
-  await loadInterpreter();
-  runButton.textContent = "Run";
-  runButton.disabled = false;
-} catch (e) {
-  runButton.textContent = "Unavailable";
-  line(`Could not load the interpreter: ${e.message || e}`, "error");
-}
+startWorker();
 </script>
 </body>
 </html>

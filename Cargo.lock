@@ -192,6 +192,7 @@ name = "nscheme-web"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "js-sys",
  "nscheme",
  "wasm-bindgen",
 ]

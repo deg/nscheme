@@ -74,7 +74,9 @@ cargo clippy --all-targets --workspace -- -D warnings    # lint (warnings are er
 cargo fmt                           # format;  cargo fmt --check to verify
 ```
 
-Browser build (ADR 0012): `web/build.sh` then `node web/smoke.mjs`; serve
+Browser build (ADRs 0012, 0013): `web/build.sh`, then `node web/smoke.mjs`
+(the wasm module) and `node web/browser-test.mjs` (the page itself, in headless
+Chrome; set `CHROME` if it isn't found); serve
 with `python3 -m http.server -d web/www`. Needs the `wasm32-unknown-unknown`
 target and the exact `wasm-bindgen-cli` version pinned in `web/Cargo.toml`.
 

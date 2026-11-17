@@ -15,3 +15,6 @@ nscheme = { path = ".." }
 # the same version (see web/build.sh).
 wasm-bindgen = "=0.2.130"
 console_error_panic_hook = "0.1"
+# A JS function to stream output to (Interpreter::run_streaming); same
+# release train as wasm-bindgen, so it rides the same lock.
+js-sys = "0.3"

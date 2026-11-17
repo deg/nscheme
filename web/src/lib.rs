@@ -1,12 +1,15 @@
-//! nscheme in a web browser: the WebAssembly wrapper (bead nscheme-yd0.1).
+//! nscheme in a web browser: the WebAssembly wrapper (beads nscheme-yd0.1,
+//! nscheme-yd0.2.2).
 //!
 //! A thin layer over the `nscheme` library, compiled to
 //! `wasm32-unknown-unknown` and exposed to JavaScript by `wasm-bindgen`.
-//! JavaScript creates an [`Interpreter`], calls [`Interpreter::run`] with
-//! program text, and gets back a [`RunResult`]: everything the program
-//! printed, the value of its last expression, its error report, or its
-//! `exit` status. `web/build.sh` builds it; `web/www/index.html` is the
-//! demo page. See ADR 0012 for the design.
+//! JavaScript creates an [`Interpreter`], calls [`Interpreter::run`] or
+//! [`Interpreter::run_streaming`] with program text, and gets back a
+//! [`RunResult`]: the value of its last expression, its error report, or
+//! its `exit` status, and (from `run`) everything it printed.
+//! `web/build.sh` builds it. The demo page `web/www/index.html` runs it
+//! in a Web Worker (`web/www/worker.js`) so a long run never freezes the
+//! page and Stop can end it. See ADRs 0012 and 0013.
 //!
 //! The library does the browser-specific work itself (a compiled-in copy
 //! of `lib/`, a wasm-safe clock, `exit` as a result instead of a process
@@ -59,8 +62,42 @@ impl Interpreter {
     }
 
     /// Evaluate every top-level form in `source`, collecting what the
-    /// program writes to the console.
+    /// program writes to the console into [`RunResult::output`].
     pub fn run(&self, source: &str) -> RunResult {
+        let output = Rc::new(RefCell::new(String::new()));
+        let collected = Rc::clone(&output);
+        let mut result = self.evaluate(source, move |text| {
+            collected.borrow_mut().push_str(text);
+        });
+        result.output = output.take();
+        result
+    }
+
+    /// Evaluate `source`, calling `on_output(text)` for each write the
+    /// program makes to the console, as it makes it, rather than
+    /// collecting the output. [`RunResult::output`] is then empty.
+    ///
+    /// Batching is the caller's job: the demo page's Worker (`worker.js`)
+    /// keeps the pending text on the JavaScript side, so it can still
+    /// send the last of it if the run traps (a trapped wasm instance can
+    /// run nothing more). A call into JS per write is cheap; it is
+    /// `postMessage` per write that would flood the page.
+    #[wasm_bindgen(js_name = runStreaming)]
+    pub fn run_streaming(&self, source: &str, on_output: &js_sys::Function) -> RunResult {
+        let on_output = on_output.clone();
+        self.evaluate(source, move |text| {
+            // A throwing callback can't stop the run from here; the
+            // program carries on and that text is lost.
+            let _ = on_output.call1(&JsValue::NULL, &JsValue::from_str(text));
+        })
+    }
+}
+
+impl Interpreter {
+    /// The run itself: evaluate `source` with console output (stdout and
+    /// stderr interleaved, in the order written) sent to `write`, and
+    /// package the outcome. `output` is left empty for the caller.
+    fn evaluate(&self, source: &str, write: impl FnMut(&str) + 'static) -> RunResult {
         // State the library keeps per thread outlives a run: an `exit`
         // (or an error that skips the raise machinery) from inside a
         // `parameterize` leaves the current ports rebound, and a
@@ -68,29 +105,27 @@ impl Interpreter {
         nscheme::io::reset_current_ports();
         let _ = nscheme::eval::take_backtrace();
 
-        let output = Rc::new(RefCell::new(String::new()));
-        let sink_output = Rc::clone(&output);
-        // Stdout and stderr go into one transcript, in the order written.
+        let write = RefCell::new(write);
         nscheme::io::set_console_sink(Some(Box::new(move |_stream, text| {
-            sink_output.borrow_mut().push_str(text);
+            (write.borrow_mut())(text);
         })));
         let outcome = eval_source(source, self.env.clone());
         nscheme::io::set_console_sink(None);
-        let output = output.take();
 
+        let empty = RunResult::new(String::new());
         match outcome {
-            Ok(Value::Unspecified) => RunResult::new(output),
+            Ok(Value::Unspecified) => empty,
             Ok(v) => RunResult {
                 value: Some(format!("{v:?}")),
-                ..RunResult::new(output)
+                ..empty
             },
             Err(EvalError::Exit(code)) => RunResult {
                 exit_code: Some(code),
-                ..RunResult::new(output)
+                ..empty
             },
             Err(e) => RunResult {
                 error: Some(nscheme::diagnostic::format_error(source, &e)),
-                ..RunResult::new(output)
+                ..empty
             },
         }
     }

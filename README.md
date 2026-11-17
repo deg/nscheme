@@ -128,10 +128,11 @@ The same interpreter compiles to WebAssembly. A [demo page](https://nscheme.dege
 ```bash
 web/build.sh                       # builds web/www/pkg/
 node web/smoke.mjs                 # checks the built wasm
+node web/browser-test.mjs          # drives the page in headless Chrome
 python3 -m http.server -d web/www  # then open http://localhost:8000/
 ```
 
-In the browser the program runs on the page's main thread (an infinite loop freezes the tab), console input reads as end-of-file, and there is no file system. See [ADR 0012](docs/0012-browser-target.md).
+Programs run in a Web Worker, so output streams in as it is printed and Stop ends a run that goes on too long. Console input reads as end-of-file, and there is no file system yet. See [ADR 0012](docs/0012-browser-target.md) and [ADR 0013](docs/0013-browser-playground.md).
 
 ## A short tour of Scheme
 
@@ -231,7 +232,7 @@ Tracked in the `bd` issue tracker, with deeper detail in [`docs/`](docs/):
 - `exit` does not run pending `dynamic-wind` after-thunks (`nscheme-zni`)
 - `make-parameter` ignores its converter procedure (`nscheme-x17`)
 - `force` turns a `raise` inside a promise into an error string, so handlers can't see the raised object (`nscheme-rsh`)
-- In the browser: no Web Worker or Stop button yet (`nscheme-yd0.2`), and no console input (`nscheme-yd0.3`)
+- In the browser: no REPL or saved files yet (`nscheme-yd0.2`), and no console input (`nscheme-yd0.3`)
 
 ## Design
 
@@ -249,6 +250,7 @@ See [`docs/`](docs/) for architecture decision records:
 - 0010 — Current ports as parameters
 - 0011 — Error diagnostics: source locations and backtraces
 - 0012 — Running in a web browser (WebAssembly)
+- 0013 — The browser playground: a Worker, streamed output, Stop
 
 ADR 0001 is the load-bearing one: it explains why the evaluator is a step-loop with continuation frames rather than recursive `eval` calls, and why that choice makes TCO and `call/cc` cheap.
 

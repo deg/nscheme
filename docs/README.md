@@ -20,6 +20,7 @@ For a reading guide to the source code, see [`../TOUR.md`](../TOUR.md).
 - [0010 — Current ports as parameters](0010-current-ports-as-parameters.md)
 - [0011 — Error diagnostics: source locations and backtraces](0011-error-diagnostics.md)
 - [0012 — Running in a web browser (WebAssembly)](0012-browser-target.md)
+- [0013 — The browser playground: a Worker, streamed output, Stop](0013-browser-playground.md)
 
 Each ADR records the decision as of its date. Where a decision was later
 revised, a dated status-note at the top of the ADR points to what changed

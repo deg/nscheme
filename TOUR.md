@@ -155,6 +155,7 @@ The `docs/000N-*.md` files are the ADRs — durable records of the load-bearing 
 - [0010 — Current ports as parameters](docs/0010-current-ports-as-parameters.md)
 - [0011 — Error diagnostics: source locations and backtraces](docs/0011-error-diagnostics.md)
 - [0012 — Running in a web browser (WebAssembly)](docs/0012-browser-target.md)
+- [0013 — The browser playground: a Worker, streamed output, Stop](docs/0013-browser-playground.md)
 
 ## Test corpus
 

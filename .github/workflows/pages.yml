@@ -55,6 +55,10 @@ jobs:
           node-version: 22
       - name: Smoke-test the wasm
         run: node web/smoke.mjs
+      # The runner image ships Google Chrome; this drives the real page
+      # (Worker, streaming, Stop, crash recovery) before it is deployed.
+      - name: Test the page in headless Chrome
+        run: node web/browser-test.mjs
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web/www
