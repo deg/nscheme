@@ -58,6 +58,11 @@ async function main() {
   };
 
   out.ready = await until(() => !evalButton.disabled && evalButton.textContent === "Evaluate");
+  // Every icon the page declares must exist (they are copied files, easy
+  // to leave out of a commit).
+  const icons = [...d.querySelectorAll('link[rel~="icon"], link[rel="apple-touch-icon"]')];
+  const iconStatus = await Promise.all(icons.map((l) => fetch(l.href).then((r) => r.ok, () => false)));
+  out.iconsResolve = icons.length === 3 && iconStatus.every(Boolean);
   await go('(display "hello") (newline) (+ 1 2)');
   out.hello = await until(() => has(/hello\\n⇒ 3\\n/));
   out.entryEchoedAndCleared = has(/› \\(display "hello"\\)/) && src.value === "";
@@ -168,6 +173,7 @@ main().catch(e => { document.getElementById("result").textContent = "RESULT " + 
 
 const EXPECT = {
   ready: true,
+  iconsResolve: true,
   hello: true,
   entryEchoedAndCleared: true,
   definitionsAccumulate: true,
@@ -203,7 +209,10 @@ try {
   process.exit(1);
 }
 
-const TYPES = { ".html": "text/html", ".js": "text/javascript", ".wasm": "application/wasm" };
+const TYPES = {
+  ".html": "text/html", ".js": "text/javascript", ".wasm": "application/wasm",
+  ".ico": "image/x-icon", ".svg": "image/svg+xml", ".png": "image/png",
+};
 
 function findChrome() {
   const candidates = [
