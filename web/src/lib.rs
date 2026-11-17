@@ -9,7 +9,9 @@
 //! its `exit` status, and (from `run`) everything it printed.
 //! `web/build.sh` builds it. The demo page `web/www/index.html` runs it
 //! in a Web Worker (`web/www/worker.js`) so a long run never freezes the
-//! page and Stop can end it. See ADRs 0012 and 0013.
+//! page and Stop can end it. The page is a REPL: each entry is
+//! evaluated in the same `Interpreter`, until Reset makes a new one and
+//! calls [`forget_user_libraries`]. See ADRs 0012 and 0013.
 //!
 //! The library does the browser-specific work itself (a compiled-in copy
 //! of `lib/`, a wasm-safe clock, `exit` as a result instead of a process
@@ -129,6 +131,15 @@ impl Interpreter {
             },
         }
     }
+}
+
+/// Forget every library except the standard ones, so the next `import`
+/// of a user's library (a saved file, or an inline `define-library`)
+/// reloads it. The playground's Reset calls this along with making a new
+/// [`Interpreter`]. See `nscheme::library::forget_user_libraries`.
+#[wasm_bindgen(js_name = forgetUserLibraries)]
+pub fn forget_user_libraries() {
+    nscheme::library::forget_user_libraries();
 }
 
 /// What one [`Interpreter::run`] produced. At most one of `value`,

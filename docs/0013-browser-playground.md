@@ -1,5 +1,13 @@
 # ADR 0013 — The browser playground: a Worker, streamed output, Stop
 
+> **Update (2026-11-17, nscheme-yd0.2.3):** the page is now a REPL session. The input box sits below the transcript, and every entry is evaluated in the same environment, which the Worker keeps for its whole life, so definitions build up. The `run` message became `eval`. A new `reset` message gives a fresh environment and calls `library::forget_user_libraries`: libraries the user supplied (saved files, inline `define-library`) are forgotten so they reload, while the standard ones stay cached, because reloading those costs up to a second. A three-level Reset menu was considered and judged over-engineered; Stop remains the full restart.
+>
+> What Reset does not undo: imported bindings share the library's own cells ([0006]), so an entry that changes a standard library (`(set! iota 5)` after importing `(scheme list)`) changes the cached library, and the change outlasts Reset. This is documented in the Reset tooltip rather than fixed, by David's choice: it is rare, and undoing it would mean reloading the standard libraries on every Reset. Stop is the full restart. `exit` now ends the session the way Reset does (fresh definitions, user libraries forgotten), but keeps the transcript, matching the CLI REPL, where `exit` ends the session.
+>
+> The page now has two output limits: at most 1,000,000 characters per entry, and 2,000,000 for the whole transcript, beyond which the oldest output is removed and a marker says so. Without the second, a few stopped floods added up to several megabytes again.
+>
+> Enter evaluates only when the cursor is at the end of the entry and its parentheses balance; anywhere else it adds a line, because an example or a paste is already balanced and Enter in the middle of one must not evaluate it. The page checks that itself (`isComplete`, which skips strings, comments, character literals and `|symbols|`), the same rule the CLI REPL applies to its input. Entries are echoed into the transcript, which scrolls inside its box and follows the end. The browser test grew to 24 steps: definitions accumulate, the Enter rule, history (with edits kept), Stop forgets definitions, two floods stay bounded, Reset clears the transcript, definitions and user libraries, and `exit` resets the session.
+
 **Status:** Accepted (2026-11-17) **Bead:** nscheme-yd0.2.2 (Browser demo runs in a Web Worker with a Stop button), parent nscheme-yd0.2 (Browser playground) **Related:** [0012 — Running in a web browser](0012-browser-target.md)
 
 ## Context
@@ -64,4 +72,5 @@ The crash step overflows the stack with 100,000 levels of nesting, which works o
 - A run that prints more than 1,000,000 characters shows only the first million on the page.
 - Console input is still end-of-file (nscheme-yd0.3).
 
+[0006]: 0006-library-system.md
 [0012]: 0012-browser-target.md
