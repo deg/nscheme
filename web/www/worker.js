@@ -10,7 +10,7 @@
 //   page -> worker   {type: "eval", id, source}   evaluate one entry
 //                    {type: "reset"}              fresh environment, and
 //                                                 forget the user's libraries
-//   worker -> page   {type: "ready"}                 once, after loading
+//   worker -> page   {type: "ready", protocol}       once, after loading
 //                    {type: "failed", message}       it could not load
 //                    {type: "output", id, text}      while entry `id` prints
 //                    {type: "done", id, value, error, exitCode}
@@ -21,7 +21,17 @@
 // or a stack overflow leaves it mid-call), so the page terminates it and
 // starts a new one, which also loses the environment.
 
-import init, { Interpreter, forgetUserLibraries } from "./pkg/nscheme_web.js";
+// The build id the page put in this script's URL (see web/build.sh). The
+// wasm glue and the wasm get it too, so all three come from one build and
+// never from a cached copy of an older one.
+const build = new URL(self.location.href).searchParams.get("v") ?? "dev";
+const { default: init, Interpreter, forgetUserLibraries } =
+  await import(`./pkg/nscheme_web.js?v=${encodeURIComponent(build)}`);
+
+// The message protocol's version, reported in "ready". The page refuses a
+// worker that speaks another one (and says to reload) rather than hang
+// waiting for replies the worker would never send.
+const PROTOCOL = 3;
 
 // Batching. The interpreter hands us every write (runStreaming); posting
 // each one would send the page a message per character. An entry runs as
@@ -81,11 +91,12 @@ self.onmessage = (event) => {
   const msg = event.data;
   if (msg.type === "eval") evaluate(msg.id, msg.source);
   else if (msg.type === "reset") reset();
+  else self.postMessage({ type: "failed", message: `this interpreter does not understand "${msg.type}"` });
 };
 
 try {
-  await init();
-  self.postMessage({ type: "ready" });
+  await init({ module_or_path: new URL(`./pkg/nscheme_web_bg.wasm?v=${encodeURIComponent(build)}`, import.meta.url) });
+  self.postMessage({ type: "ready", protocol: PROTOCOL });
 } catch (e) {
   self.postMessage({ type: "failed", message: String(e && e.message || e) });
 }

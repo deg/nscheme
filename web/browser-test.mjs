@@ -166,6 +166,16 @@ async function main() {
   out.outputBeforeCrashShown = has(/first last words/);
   await go("(* 7 8)");
   out.runsAfterCrash = await until(() => has(/⇒ 56/), 40000);
+
+  // A cached worker from an older deploy speaks an older protocol: the
+  // page must say so, not hang (nscheme-yd0.2.5). The test server can
+  // serve such a worker; Stop makes the page start a new one.
+  await fetch("/__stale-worker/on");
+  await go("(let loop () (loop))");
+  await sleep(300);
+  stop.click();
+  out.staleWorkerReported = await until(() => has(/out of step/));
+  await fetch("/__stale-worker/off");
   document.getElementById("result").textContent = "RESULT " + JSON.stringify(out);
 }
 main().catch(e => { document.getElementById("result").textContent = "RESULT " + JSON.stringify({ error: String(e) }); });
@@ -198,6 +208,7 @@ const EXPECT = {
   crashReported: true,
   outputBeforeCrashShown: true,
   runsAfterCrash: true,
+  staleWorkerReported: true,
 };
 
 // The harness is a string, so a typo in it would only show as a run
@@ -232,13 +243,29 @@ if (!chrome) {
   console.log("FAIL: no Chrome found; set CHROME to its binary");
   process.exit(1);
 }
-if (!existsSync(join(www, "pkg", "nscheme_web_bg.wasm"))) {
+if (!existsSync(join(www, "pkg", "nscheme_web_bg.wasm")) || !existsSync(join(www, "pkg", "build.json"))) {
   console.log("FAIL: web/www/pkg is missing; run web/build.sh first");
   process.exit(1);
 }
 
+// What the page asked for, to check its URLs carry the build id; and a
+// switch to serve a worker from an "older deploy" instead of worker.js.
+const requests = [];
+let serveStaleWorker = false;
+const STALE_WORKER = "self.postMessage({ type: 'ready' }); self.onmessage = () => {};";
+
 const server = createServer((req, res) => {
+  requests.push(req.url);
   const path = decodeURIComponent(new URL(req.url, "http://x").pathname);
+  if (path.startsWith("/__stale-worker/")) {
+    serveStaleWorker = path.endsWith("/on");
+    res.writeHead(204);
+    return res.end();
+  }
+  if (path === "/worker.js" && serveStaleWorker) {
+    res.writeHead(200, { "content-type": "text/javascript" });
+    return res.end(STALE_WORKER);
+  }
   if (path === "/harness.html") {
     res.writeHead(200, { "content-type": "text/html" });
     return res.end(HARNESS);
@@ -320,6 +347,13 @@ for (const [step, want] of Object.entries(EXPECT)) {
   if (!ok) failures++;
 }
 if (result.error) { console.log(`FAIL harness error: ${result.error}`); failures++; }
+// Every file the worker loads must carry this build's id, or a browser
+// could serve a cached copy from an older deploy (nscheme-yd0.2.5).
+const { id } = JSON.parse(readFileSync(join(www, "pkg", "build.json"), "utf8"));
+const versioned = ["/worker.js", "/pkg/nscheme_web.js", "/pkg/nscheme_web_bg.wasm"]
+  .every((f) => requests.includes(`${f}?v=${id}`));
+console.log(`${versioned ? "ok  " : "FAIL"} versionedUrls${versioned ? "" : `: requests were ${JSON.stringify(requests.filter((r) => !r.startsWith("/__")))}`}`);
+if (!versioned) failures++;
 if (result.floodStopMs !== undefined) {
   console.log(`     (flood: Stop took ${result.floodStopMs} ms with ${result.floodChars} characters on the page)`);
 }

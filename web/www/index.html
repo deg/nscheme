@@ -256,10 +256,19 @@ const MAX_PAGE_CHARS = 2_000_000;
 let pageChars = 0;
 let trimmedMarker = null;
 
+// The message protocol this page speaks; the worker reports its own in
+// "ready" (see worker.js).
+const PROTOCOL = 3;
+
+// The build id (see web/build.sh), fetched uncached so a new deploy's
+// worker is never served from a browser's cached copy of an old one.
+const BUILD = await fetch("pkg/build.json", { cache: "no-store" })
+  .then((r) => r.json()).then((b) => b.id).catch(() => String(Date.now()));
+
 function startWorker() {
   ready = false;
   updateButtons();
-  worker = new Worker("./worker.js", { type: "module" });
+  worker = new Worker(`./worker.js?v=${encodeURIComponent(BUILD)}`, { type: "module" });
   worker.onmessage = (event) => onWorkerMessage(event.data);
   worker.onerror = (event) => {
     event.preventDefault();
@@ -283,6 +292,12 @@ function unavailable(message) {
 function onWorkerMessage(msg) {
   switch (msg.type) {
     case "ready":
+      if (msg.protocol !== PROTOCOL) {
+        worker.terminate();
+        unavailable("The page and the interpreter are out of step (a newer version may " +
+                    "have just been published)");
+        break;
+      }
       ready = true;
       evalButton.textContent = "Evaluate";
       updateButtons();

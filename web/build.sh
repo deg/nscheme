@@ -34,4 +34,12 @@ cargo build -p nscheme-web --target wasm32-unknown-unknown "${cargo_flags[@]+"${
 wasm-bindgen --target web --no-typescript \
     --out-dir "$root/web/www/pkg" \
     "${CARGO_TARGET_DIR:-$root/target}/wasm32-unknown-unknown/$profile/nscheme_web.wasm"
+
+# A build id: a hash of the files the Worker loads. The page fetches
+# pkg/build.json uncached and puts the id in those files' URLs, so a new
+# build is never served from a browser's cached copy of an old one
+# (bead nscheme-yd0.2.5; GitHub Pages caches every file for 10 minutes).
+id="$(cat "$root/web/www/worker.js" "$root/web/www/pkg/nscheme_web.js" \
+        "$root/web/www/pkg/nscheme_web_bg.wasm" | shasum -a 256 | cut -c1-16)"
+printf '{"id": "%s"}\n' "$id" > "$root/web/www/pkg/build.json"
 ls -l "$root/web/www/pkg"
