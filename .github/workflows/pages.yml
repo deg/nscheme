@@ -6,7 +6,9 @@
 # One-time setup: Pages must be enabled with GitHub Actions as its source
 # (Settings > Pages > Source: GitHub Actions, or
 # `gh api -X POST repos/OWNER/REPO/pages -f build_type=workflow`),
-# or the deploy job fails.
+# or the deploy job fails. The custom domain (nscheme.degel.com, a CNAME to
+# deg.github.io) is set in the same settings, not by a CNAME file: a
+# workflow-built site ignores one.
 name: Browser demo (GitHub Pages)
 
 on:

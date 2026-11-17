@@ -6,7 +6,7 @@ An [R7RS](https://standards.scheme.org/) Scheme interpreter written in Rust — 
 - **Curious how it was built?** [PROJECT.md](PROJECT.md) is the retrospective on the AI-assisted build process.
 - **What can it do?** [docs/showcase/](docs/showcase/) is a dozen tiny programs that show off the R7RS-large libraries.
 - **How conformant is it?** [docs/CONFORMANCE.md](docs/CONFORMANCE.md) — each library runs its actual upstream SRFI reference suite.
-- **Want to try it without installing anything?** The [browser demo](https://deg.github.io/nscheme/) runs it as WebAssembly. See "Running in a browser" below.
+- **Want to try it without installing anything?** The [browser demo](https://nscheme.degel.com/) runs it as WebAssembly. See "Running in a browser" below.
 - **Contributing or extending it?** [docs/STYLE.md](docs/STYLE.md) describes the in-code commentary conventions; [docs/](docs/) holds the architecture decision records.
 
 ## What this is
@@ -123,7 +123,7 @@ Evaluates the file (one or more files) into the session, then drops you into the
 
 ### Running in a browser
 
-The same interpreter compiles to WebAssembly. A [demo page](https://deg.github.io/nscheme/) is built from `web/` and deployed to GitHub Pages on every push to `main`. To build it locally (needs the `wasm32-unknown-unknown` target and the exact `wasm-bindgen-cli` version `web/build.sh` names):
+The same interpreter compiles to WebAssembly. A [demo page](https://nscheme.degel.com/) is built from `web/` and deployed to GitHub Pages on every push to `main`. To build it locally (needs the `wasm32-unknown-unknown` target and the exact `wasm-bindgen-cli` version `web/build.sh` names):
 
 ```bash
 web/build.sh                       # builds web/www/pkg/
