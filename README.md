@@ -202,7 +202,7 @@ Currently working:
 
 - Full numeric tower (`i64` / arbitrary-precision `BigInt` / exact `BigRational` / `f64` / `Complex`) with R7RS exact/inexact promotion; complex literals (`1+2i`) parse and evaluate
 - String / char / symbol / vector / bytevector operations with Unicode-aware string indexing
-- Textual ports (string and file), `display` / `write` / `read-char` / datum `read`, `eof-object`, `call-with-port`, `call-with-output-file` / `call-with-input-file`; `parameterize`-able `current-output-port` / `current-input-port` with the redirection family (`with-output-to-file`, `with-input-from-file`, `with-output-to-string`, `with-input-from-string`)
+- Textual ports (string and file), `display` / `write` / `read-char` / datum `read`, `eof-object`, `call-with-port`, `call-with-output-file` / `call-with-input-file`; `parameterize`-able `current-output-port` / `current-input-port` with the redirection family (`with-output-to-file`, `with-input-from-file`, `with-output-to-string`, `with-input-from-string`). An embedder can replace the filesystem they all use (`nscheme::files`), for example with the in-memory one it provides
 - Hygienic `syntax-rules` (scope-based) — `define-syntax`, `let-syntax`, `letrec-syntax`
 - `define-library`, `import` (with `only` / `except` / `prefix` / `rename`), `cond-expand`, and a **filesystem loader** that finds `(import (foo bar))` on disk as `foo/bar.sld` (search path: `NSCHEME_LIB_PATH` → compiled-in default → `./lib` → a copy of `lib/` compiled into the binary)
 - `call/cc`, `call-with-current-continuation`, `dynamic-wind`, `apply`
@@ -260,7 +260,7 @@ ADR 0001 is the load-bearing one: it explains why the evaluator is a step-loop w
 cargo test --workspace
 ```
 
-That runs about **699 tests across ~49 files** in a few seconds (plain `cargo test` skips the browser wrapper's 7) (the slow SRFI 132 sort suite is `#[ignore]`d — run it with `-- --ignored`). The suite covers each module's unit tests, end-to-end integration tests (evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters), the in-house R7RS conformance corpus, and the R7RS-large reference-suite harness described below.
+That runs about **712 tests across ~50 files** in a few seconds (plain `cargo test` skips the browser wrapper's 7) (the slow SRFI 132 sort suite is `#[ignore]`d — run it with `-- --ignored`). The suite covers each module's unit tests, end-to-end integration tests (evaluation, tail calls, special forms, the base library, I/O, macros, libraries, continuations, exceptions, lazy evaluation, multiple values, parameters), the in-house R7RS conformance corpus, and the R7RS-large reference-suite harness described below.
 
 ### R7RS-large reference suites
 

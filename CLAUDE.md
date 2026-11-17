@@ -64,7 +64,7 @@ single binary, no bytecode VM. See `README.md` for the user-facing overview,
 cargo build                         # debug binary at target/debug/nscheme
 cargo build --release               # optimized binary at target/release/nscheme
 
-cargo test --workspace              # full suite (~699 tests; SRFI 132 sort is #[ignore]d)
+cargo test --workspace              # full suite (~712 tests; SRFI 132 sort is #[ignore]d)
 cargo test --test conformance       # R7RS-large upstream SRFI reference suites
 cargo test --test conformance -- --ignored   # also the ~2-min sort suite
 cargo test --test r7rs_chibi -- --nocapture  # chibi R7RS-small corpus (1180 forms / 1225 assertions)
@@ -95,6 +95,11 @@ override with `NSCHEME_LIB_PATH=lib` if you've moved things.
 - `value.rs` is the data model (the `Value` enum + the three equality
   predicates + the numeric tower). `builtins.rs` is the flat catalog of
   primitives; `io.rs` is ports. `macros.rs` is scope-based `syntax-rules`.
+- **File access goes through `files.rs`**, never `std::fs` directly (only
+  `main.rs`, the host reading its input, may): a replaceable per-thread
+  `FileSystem`, the disk by default, replaceable by an embedder (an in-memory
+  one is provided). A new
+  primitive that touches files must call `crate::files::*`.
 - `library.rs` is `define-library`/`import`/`cond-expand` **plus a filesystem
   loader**: `(import (foo bar))` resolves to `foo/bar.sld` on the search path
   (`NSCHEME_LIB_PATH` → compiled-in `<crate>/lib` → `./lib` → the copy of

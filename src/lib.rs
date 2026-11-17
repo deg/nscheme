@@ -23,6 +23,9 @@
 //! - [`macros`] — `syntax-rules` hygienic macro expander.
 //! - [`builtins`] — the `(scheme base)` library of primitive
 //!   procedures (`+`, `car`, `string-length`, …) implemented in Rust.
+//! - [`files`] — the replaceable filesystem every file operation goes
+//!   through: the disk by default, or one an embedder installs, such as
+//!   the in-memory one it provides.
 //! - [`io`] — port primitives (`open-input-file`, `read-char`,
 //!   `display`, …).
 //! - [`library`] — `define-library`, `import`, `cond-expand`. The
@@ -40,6 +43,7 @@ mod casefold_table;
 pub mod diagnostic;
 pub mod env;
 pub mod eval;
+pub mod files;
 pub mod io;
 pub mod lex;
 pub mod library;

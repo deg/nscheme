@@ -60,6 +60,8 @@ Once you've read the evaluator, the remaining files are small and self-contained
 
 [`src/io.rs`](src/io.rs) — port I/O. Same flat-catalog shape as `builtins.rs`.
 
+[`src/files.rs`](src/files.rs) — the filesystem every file operation goes through: the disk by default, or one an embedder installs, such as the in-memory one it provides for hosts without a disk. The crate's first trait object.
+
 [`src/library.rs`](src/library.rs) — `define-library`, `import` (with `only`/`except`/`prefix`/`rename`), `cond-expand`, and the **filesystem loader**: an `(import (foo bar))` that isn't built in is resolved to `foo/bar.sld` on a search path. This is how the 21 R7RS-large libraries under [`lib/`](lib/) get loaded on demand. As a last resort it uses the copy of `lib/` that [`build.rs`](build.rs) compiles into the binary.
 
 [`src/main.rs`](src/main.rs) — the CLI frontend. The thin binary that consumes the library above. Wraps an interactive REPL with `rustyline` for line editing.

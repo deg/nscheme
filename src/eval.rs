@@ -922,7 +922,7 @@ fn process_library_decls(
                     };
                     // Resolve relative to the including file's directory.
                     let resolved = crate::library::resolve_include(&p.borrow());
-                    let source = std::fs::read_to_string(&resolved).map_err(|e| {
+                    let source = crate::files::read_to_string(&resolved).map_err(|e| {
                         EvalError::malformed("include", format!("read {}: {e}", resolved.display()))
                     })?;
                     eval_source(&source, lib_env.clone())?;
@@ -3023,7 +3023,7 @@ fn step_apply(
                 ));
             };
             let resolved = crate::library::resolve_include(&s.borrow());
-            let source = match std::fs::read_to_string(&resolved) {
+            let source = match crate::files::read_to_string(&resolved) {
                 Ok(src) => src,
                 // A missing/unreadable file is a catchable R7RS condition.
                 Err(e) => {

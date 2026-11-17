@@ -3,8 +3,10 @@
 //! Beyond the R7RS-small core forms, this module discovers libraries on
 //! disk: an `(import (foo bar))` that isn't built in is resolved to
 //! `foo/bar.sld` on a search path, which is how the R7RS-large SRFI
-//! libraries under `lib/` are loaded on demand. The same sources are
-//! also compiled into the binary as a last-resort fallback.
+//! libraries under `lib/` are loaded on demand. "On disk" means the
+//! installed [`crate::files`] filesystem, which an embedder can replace
+//! (with an in-memory one, say). The same sources are also compiled
+//! into the binary as a last-resort fallback.
 //!
 //! ## What you'll learn here
 //!
@@ -281,7 +283,7 @@ fn find_library_source(name: &LibraryName) -> Option<LibrarySource> {
     for dir in library_search_path() {
         for ext in ["sld", "scm"] {
             let candidate = dir.join(&rel).with_extension(ext);
-            if candidate.is_file() {
+            if crate::files::is_file(&candidate) {
                 return Some(LibrarySource::Disk(candidate));
             }
         }
@@ -338,7 +340,7 @@ pub fn try_load_library(name: &LibraryName) -> Result<bool, EvalError> {
     // fails cleanly where it doesn't.
     let (source, path) = match found {
         LibrarySource::Disk(path) => {
-            let source = std::fs::read_to_string(&path)
+            let source = crate::files::read_to_string(&path)
                 .map_err(|e| malformed(&format!("reading library ({}): {e}", name.join(" "))))?;
             (std::borrow::Cow::Owned(source), path)
         }

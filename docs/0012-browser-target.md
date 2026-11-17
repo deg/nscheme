@@ -1,5 +1,7 @@
 # ADR 0012 — Running in a web browser (WebAssembly)
 
+> **Update (2026-11-17):** file access now follows the same pattern as the console sink (§3). Every file operation a program can cause goes through a replaceable per-thread filesystem (`files::set_file_system`): `open-input-file`, the write on `close-port`, `file-exists?`, `delete-file`, `load`, `include` and the library loader's disk lookup. It defaults to `StdFileSystem`, the disk. `MemoryFileSystem` holds text files keyed by lexically normalized path, and reports each write and delete to an optional observer. This is what the browser playground (nscheme-yd0.2) builds its persistent files on. So "file ports fail with `Unsupported`" below holds only while no other filesystem is installed. Bead: nscheme-yd0.2.1.
+
 **Status:** Accepted (2026-11-16) **Bead:** nscheme-yd0.1 (Minimal browser demo), epic nscheme-yd0 (Run nscheme in a web browser via WebAssembly) **Related:** [0007 — Filesystem-loaded libraries](0007-filesystem-library-loader.md), [0010 — Current ports as parameters](0010-current-ports-as-parameters.md), [0011 — Error diagnostics](0011-error-diagnostics.md)
 
 ## Context

@@ -65,12 +65,13 @@
 //! ## Read alongside
 //!
 //! - [`crate::value::Port`] — the underlying enum and its variants.
+//! - [`crate::files`] — where file ports actually read and write: the
+//!   disk, or whatever filesystem the embedder installed.
 //! - R7RS §6.13.
 
 #![allow(clippy::too_many_lines)]
 
 use std::cell::RefCell;
-use std::fs;
 use std::io::Write as _;
 use std::rc::Rc;
 
@@ -457,7 +458,7 @@ pub fn install_io(env: &EnvRef) {
     define_prim(env, "open-input-file", Arity::Exact(1), |a| match &a[0] {
         Value::String(path) => {
             let p = path.borrow().clone();
-            let content = fs::read_to_string(&p)
+            let content = crate::files::read_to_string(p.as_ref())
                 .map_err(|e| RuntimeError::FileError(format!("open-input-file({p}): {e}")))?;
             Ok(Value::Port(Rc::new(RefCell::new(Port::FileInput {
                 content,
@@ -480,7 +481,7 @@ pub fn install_io(env: &EnvRef) {
             // Flush file output ports before closing.
             let snapshot = std::mem::replace(&mut *p.borrow_mut(), Port::Closed);
             if let Port::FileOutput { buffer, path } = snapshot {
-                fs::write(&path, buffer)
+                crate::files::write(path.as_ref(), &buffer)
                     .map_err(|e| RuntimeError::Other(format!("close-port({path}): {e}")))?;
             }
             Ok(Value::Unspecified)
@@ -498,7 +499,7 @@ pub fn install_io(env: &EnvRef) {
         Value::Port(p) => {
             let snapshot = std::mem::replace(&mut *p.borrow_mut(), Port::Closed);
             if let Port::FileOutput { buffer, path } = snapshot {
-                fs::write(&path, buffer)
+                crate::files::write(path.as_ref(), &buffer)
                     .map_err(|e| RuntimeError::Other(format!("close-output-port: {e}")))?;
             }
             Ok(Value::Unspecified)
@@ -727,13 +728,13 @@ pub fn install_io(env: &EnvRef) {
     // -- file utilities --------------------------------------------
 
     define_prim(env, "file-exists?", Arity::Exact(1), |a| match &a[0] {
-        Value::String(path) => Ok(Value::Bool(fs::metadata(&*path.borrow()).is_ok())),
+        Value::String(path) => Ok(Value::Bool(crate::files::exists(path.borrow().as_ref()))),
         other => Err(type_err("string", other)),
     });
     define_prim(env, "delete-file", Arity::Exact(1), |a| match &a[0] {
         Value::String(path) => {
             let p = path.borrow().clone();
-            fs::remove_file(&p)
+            crate::files::remove_file(p.as_ref())
                 .map_err(|e| RuntimeError::FileError(format!("delete-file({p}): {e}")))?;
             Ok(Value::Unspecified)
         }
