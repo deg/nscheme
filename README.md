@@ -224,11 +224,13 @@ Tracked in the `bd` issue tracker, with deeper detail in [`docs/`](docs/):
 
 - Hygiene is scope-based and passes the canonical tests, but the full sets-of-scopes algorithm is not yet complete (`nscheme-d6o`)
 - Environments aren't reified: `eval`'s environment argument and `null-environment`/`scheme-report-environment` all resolve to the interaction environment
-- Error locations point at the nearest enclosing *recorded* form, so an error inside macro-expanded code reports the macro call site, not the original template (`nscheme-tn3` follow-up: span-preserving macro expansion)
+- Error locations point at the nearest enclosing *recorded* form, so an error inside macro-expanded code reports the macro call site, not the original template (`nscheme-mv9`: span-preserving macro expansion)
+- After an `import` loads a library, the next error's location points at a line inside the library rather than the program (`nscheme-lez`)
 - Performance: it's a tree-walking interpreter with no bytecode VM, so heavy loops are slow (`nscheme-6mp`)
-- User-defined error categories beyond `read-error?` / `file-error?` (`nscheme-1o2`)
 - Very deeply nested data (thousands of levels) overflows the stack in the reader instead of raising an error: about 9,500 levels natively, about 4,800 in a browser (`nscheme-m6i`)
-- `exit` does not run pending `dynamic-wind` after-thunks
+- `exit` does not run pending `dynamic-wind` after-thunks (`nscheme-zni`)
+- `make-parameter` ignores its converter procedure (`nscheme-x17`)
+- `force` turns a `raise` inside a promise into an error string, so handlers can't see the raised object (`nscheme-rsh`)
 - In the browser: no Web Worker or Stop button yet (`nscheme-yd0.2`), and no console input (`nscheme-yd0.3`)
 
 ## Design
